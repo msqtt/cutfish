@@ -5,13 +5,17 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { del, get, set } from 'idb-keyval';
 import {
-  ChevronLeft, ChevronRight, Download, FileVideo, Moon, MonitorPlay, Pause,
+  ChevronLeft, ChevronRight, FileVideo, Moon, MonitorPlay, Pause,
   Play, Plus, Redo2, RotateCcw, RotateCw, SlidersHorizontal, Sun, Trash2,
   Undo2, Upload, X,
 } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { useTranslation } from 'react-i18next';
-import { buildFFmpegCommand } from '@/lib/ffmpeg-utils';
+import ExportPanel from '@/components/ExportPanel';
+import {
+  buildFFmpegCommand, resolveExportProfile, selectClipsForExport,
+  type ExportSettings,
+} from '@/lib/ffmpeg-utils';
 import { useHistory } from '@/lib/history';
 import '@/lib/i18n';
 
@@ -30,16 +34,24 @@ export interface EditorState {
   activeClipId: string | null;
   audioDelay: number;
   filters: { brightness: number; contrast: number; saturation: number };
+  exportSettings: ExportSettings;
 }
 
-type DraftState = Omit<EditorState, 'clips'> & { clips: Array<Omit<Clip, 'url'>> };
+type DraftState = Omit<EditorState, 'clips' | 'exportSettings'> & {
+  clips: Array<Omit<Clip, 'url'>>;
+  exportSettings?: Partial<ExportSettings>;
+};
 type MobilePanel = 'media' | 'inspector' | null;
 type Toast = { kind: 'success' | 'error'; message: string } | null;
 
 const DRAFT_KEY = 'cutfish-draft-v1';
+const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
+  resolution: '720p', frameRate: 30, quality: 'balanced', rangeStart: 0, rangeEnd: null,
+};
 const DEFAULT_STATE: EditorState = {
   clips: [], activeClipId: null, audioDelay: 0,
   filters: { brightness: 100, contrast: 100, saturation: 100 },
+  exportSettings: DEFAULT_EXPORT_SETTINGS,
 };
 const iconButton = 'rounded-md p-2 text-[var(--muted)] transition hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-30';
 
@@ -111,7 +123,7 @@ export default function Editor() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [processing, setProcessing] = useState(false);
-  const [processingStage, setProcessingStage] = useState<'loading' | 'rendering'>('loading');
+  const [processingStage, setProcessingStage] = useState<'loading' | 'preparing' | 'rendering'>('loading');
   const [progress, setProgress] = useState(0);
   const [draftReady, setDraftReady] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
@@ -125,8 +137,12 @@ export default function Editor() {
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const ffmpegLoadRef = useRef<Promise<FFmpeg> | null>(null);
   const cancelRequestedRef = useRef(false);
+  const continuePlaybackRef = useRef(false);
 
   const activeClip = state.clips.find((clip) => clip.id === state.activeClipId);
+  const projectDuration = state.clips.reduce(
+    (total, clip) => total + Math.max(0, clip.trimEnd - clip.trimStart), 0,
+  );
 
   const createTrackedUrl = useCallback((file: Blob) => {
     const url = URL.createObjectURL(file);
@@ -155,7 +171,14 @@ export default function Editor() {
         if (clips.length && !cancelled) {
           const activeClipId = clips.some((clip) => clip.id === draft.activeClipId)
             ? draft.activeClipId : clips[0].id;
-          reset({ ...draft, clips, activeClipId });
+          reset({
+            ...DEFAULT_STATE,
+            ...draft,
+            filters: { ...DEFAULT_STATE.filters, ...draft.filters },
+            exportSettings: { ...DEFAULT_EXPORT_SETTINGS, ...draft.exportSettings },
+            clips,
+            activeClipId,
+          });
         }
       } catch (error) {
         console.error('Draft restore failed', error);
@@ -177,10 +200,13 @@ export default function Editor() {
         ...state,
         clips: state.clips.map(toDraftClip),
       };
-      void set(DRAFT_KEY, draft).catch((error) => console.error('Draft save failed', error));
+      void set(DRAFT_KEY, draft).catch((error) => {
+        console.error('Draft save failed', error);
+        setToast({ kind: 'error', message: t('draft_error') });
+      });
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [draftReady, state]);
+  }, [draftReady, state, t]);
 
   useEffect(() => {
     if (!toast) return;
@@ -205,25 +231,25 @@ export default function Editor() {
       return;
     }
 
-    const clips = await Promise.all(videos.map(async (file) => {
+    const validClips: Clip[] = [];
+    for (const file of videos) {
       const url = createTrackedUrl(file);
       try {
         const duration = await getVideoDuration(url);
-        return {
+        validClips.push({
           id: crypto.randomUUID(), url, name: file.name, duration,
           trimStart: 0, trimEnd: duration, file,
-        } satisfies Clip;
+        });
       } catch {
         URL.revokeObjectURL(url);
         objectUrlsRef.current.delete(url);
-        return null;
       }
-    }));
-    const validClips = clips.filter((clip): clip is Clip => clip !== null);
+    }
     if (!validClips.length) {
       setToast({ kind: 'error', message: t('invalid_file') });
       return;
     }
+    if (navigator.storage?.persist) void navigator.storage.persist().catch(() => false);
     updateState((current) => ({
       ...current,
       clips: [...current.clips, ...validClips],
@@ -308,6 +334,11 @@ export default function Editor() {
 
   const handleExport = useCallback(async (format: 'mp4' | 'webm') => {
     if (!state.clips.length || processing) return;
+    const effectiveEnd = Math.min(state.exportSettings.rangeEnd ?? projectDuration, projectDuration);
+    const requestedStart = Math.max(0, Math.min(state.exportSettings.rangeStart, projectDuration));
+    const effectiveStart = requestedStart < effectiveEnd ? requestedStart : 0;
+    if (effectiveEnd <= effectiveStart) return;
+
     setProcessing(true);
     setProcessingStage('loading');
     setProgress(0);
@@ -318,20 +349,50 @@ export default function Editor() {
     try {
       engine = await ensureFfmpeg();
       if (cancelRequestedRef.current) return;
-      setProcessingStage('rendering');
+      setProcessingStage('preparing');
 
-      const metadata = await Promise.all(state.clips.map(async (clip, index) => {
+      const selectedClips = selectClipsForExport(state.clips, {
+        start: effectiveStart,
+        end: effectiveEnd,
+      });
+      const metadata: Array<{
+        id: string; filename: string; trimStart: number; trimEnd: number; hasAudio: boolean;
+      }> = [];
+
+      for (const [index, clip] of selectedClips.entries()) {
+        if (cancelRequestedRef.current) return;
         const extension = clip.name.split('.').pop()?.replace(/[^a-z0-9]/gi, '') || 'mp4';
         const filename = `input-${index}.${extension}`;
-        temporaryFiles.push(filename);
-        await engine!.writeFile(filename, await fetchFile(clip.file));
-        return { id: clip.id, filename, trimStart: clip.trimStart, trimEnd: clip.trimEnd };
-      }));
+        const probeName = `probe-${index}.txt`;
+        temporaryFiles.push(filename, probeName);
+        await engine.writeFile(filename, await fetchFile(clip.file));
+        const probeCode = await engine.ffprobe([
+          '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_type',
+          '-of', 'default=noprint_wrappers=1:nokey=1', filename, '-o', probeName,
+        ]);
+        if (probeCode !== 0) throw new Error(`FFprobe exited with code ${probeCode}`);
+        let hasAudio = false;
+        try {
+          const probeData = await engine.readFile(probeName);
+          hasAudio = typeof probeData !== 'string'
+            && new TextDecoder().decode(probeData).trim() === 'audio';
+        } catch {
+          // ffprobe can omit the output file when no matching audio stream exists.
+        }
+        metadata.push({
+          id: clip.id, filename, trimStart: clip.trimStart, trimEnd: clip.trimEnd, hasAudio,
+        });
+      }
 
-      const exitCode = await engine.exec(buildFFmpegCommand(metadata, state.filters, state.audioDelay, format));
-      if (exitCode !== 0) throw new Error(`FFmpeg exited with code ${exitCode}`);
+      if (cancelRequestedRef.current) return;
+      setProcessingStage('rendering');
+      const profile = resolveExportProfile(state.exportSettings);
       const outputName = `output.${format}`;
       temporaryFiles.push(outputName);
+      const exitCode = await engine.exec(
+        buildFFmpegCommand(metadata, state.filters, state.audioDelay, format, profile),
+      );
+      if (exitCode !== 0) throw new Error(`FFmpeg exited with code ${exitCode}`);
       const data = await engine.readFile(outputName);
       if (typeof data === 'string') throw new Error('Unexpected text output');
       const url = URL.createObjectURL(new Blob([data as unknown as BlobPart], { type: `video/${format}` }));
@@ -350,12 +411,14 @@ export default function Editor() {
       }
     } finally {
       if (engine && !cancelRequestedRef.current) {
-        await Promise.all(temporaryFiles.map((filename) => engine!.deleteFile(filename).catch(() => undefined)));
+        for (const filename of temporaryFiles) {
+          await engine.deleteFile(filename).catch(() => undefined);
+        }
       }
       setProcessing(false);
       setProgress(0);
     }
-  }, [ensureFfmpeg, processing, state, t]);
+  }, [ensureFfmpeg, processing, projectDuration, state, t]);
 
   const cancelExport = useCallback(() => {
     cancelRequestedRef.current = true;
@@ -409,6 +472,10 @@ export default function Editor() {
     }));
   };
 
+  const processingLabel = processingStage === 'loading'
+    ? t('loading_engine')
+    : processingStage === 'preparing' ? t('preparing_media') : t('exporting');
+
   const previewStyle = {
     filter: `brightness(${state.filters.brightness}%) contrast(${state.filters.contrast}%) saturate(${state.filters.saturation}%)`,
   };
@@ -456,9 +523,9 @@ export default function Editor() {
             {state.clips.map((clip, index) => (
               <div key={clip.id} className={`group relative rounded-lg border p-1.5 transition ${state.activeClipId === clip.id ? 'border-indigo-500 bg-indigo-500/10' : 'border-[var(--border)] bg-[var(--raised)] hover:border-indigo-400'}`}>
                 <button onClick={() => { replaceState((current) => ({ ...current, activeClipId: clip.id })); setMobilePanel(null); }} className="block w-full rounded text-left" aria-pressed={state.activeClipId === clip.id}>
-                  <span className="relative flex aspect-video items-center justify-center overflow-hidden rounded bg-[var(--canvas)]">
-                    <video src={clip.url} muted preload="metadata" className="absolute inset-0 h-full w-full object-cover opacity-60" />
-                    <span className="relative rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">{t('duration', { value: clip.duration.toFixed(1) })}</span>
+                  <span className="relative flex aspect-video items-center justify-center overflow-hidden rounded bg-gradient-to-br from-indigo-500/20 via-[var(--canvas)] to-cyan-500/10">
+                    <FileVideo className="h-7 w-7 text-indigo-500/60" aria-hidden="true" />
+                    <span className="absolute bottom-1.5 right-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">{t('duration', { value: clip.duration.toFixed(1) })}</span>
                   </span>
                   <span className="mt-1 block truncate px-0.5 text-[11px]">{clip.name}</span>
                 </button>
@@ -494,13 +561,27 @@ export default function Editor() {
                   onLoadedMetadata={(event) => {
                     event.currentTarget.currentTime = activeClip.trimStart;
                     setCurrentTime(activeClip.trimStart);
-                    setIsPlaying(false);
+                    if (continuePlaybackRef.current) {
+                      continuePlaybackRef.current = false;
+                      void event.currentTarget.play().catch(() => setIsPlaying(false));
+                    } else {
+                      setIsPlaying(false);
+                    }
                   }}
                   onTimeUpdate={(event) => {
                     const time = event.currentTarget.currentTime;
                     setCurrentTime(time);
                     if (time >= activeClip.trimEnd) {
-                      event.currentTarget.pause(); event.currentTarget.currentTime = activeClip.trimStart; setIsPlaying(false);
+                      const index = state.clips.findIndex((clip) => clip.id === activeClip.id);
+                      const nextClip = state.clips[index + 1];
+                      event.currentTarget.pause();
+                      if (nextClip) {
+                        continuePlaybackRef.current = true;
+                        replaceState((current) => ({ ...current, activeClipId: nextClip.id }));
+                      } else {
+                        event.currentTarget.currentTime = activeClip.trimStart;
+                        setIsPlaying(false);
+                      }
                     }
                   }}
                   onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onClick={togglePlay}
@@ -517,9 +598,9 @@ export default function Editor() {
           </div>
 
           {processing && (
-            <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-black/80 px-4 text-white backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={processingStage === 'loading' ? t('loading_engine') : t('exporting')}>
+            <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-black/80 px-4 text-white backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={processingLabel}>
               <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-indigo-400 border-t-transparent" />
-              <p className="mb-3 text-lg font-medium">{processingStage === 'loading' ? t('loading_engine') : t('exporting')}</p>
+              <p className="mb-3 text-lg font-medium">{processingLabel}</p>
               {processingStage === 'rendering' && <><div className="h-2 w-full max-w-xs overflow-hidden rounded-full bg-white/20"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${progress}%` }} /></div><p className="mt-2 font-mono text-sm text-white/70">{progress.toFixed(0)}%</p></>}
               <button onClick={cancelExport} className="mt-5 rounded-md border border-white/30 px-4 py-2 text-sm hover:bg-white/10">{t('cancel')}</button>
             </div>
@@ -548,20 +629,26 @@ export default function Editor() {
               <h2 id="audio-heading" className="mb-3 text-xs font-medium">{t('audio_sync')} <span className="text-[var(--muted)]">· {t('global')}</span></h2>
               <RangeControl label={t('audio_sync')} value={state.audioDelay} min={-5000} max={5000} step={100} unit="ms" onChange={(value) => replaceState((current) => ({ ...current, audioDelay: value }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
             </section>
-            <section aria-labelledby="export-heading">
-              <h2 id="export-heading" className="mb-3 text-xs font-medium">{t('export')}</h2>
-              <div className="grid grid-cols-2 gap-2">
-                <button onClick={() => void handleExport('mp4')} disabled={!state.clips.length || processing} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_mp4')}</button>
-                <button onClick={() => void handleExport('webm')} disabled={!state.clips.length || processing} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_webm')}</button>
-              </div>
-            </section>
+            <ExportPanel
+              settings={state.exportSettings}
+              projectDuration={projectDuration}
+              disabled={!state.clips.length || processing}
+              onChange={(settings, transient) => {
+                const apply = (current: EditorState) => ({ ...current, exportSettings: settings });
+                if (transient) replaceState(apply);
+                else updateState(apply);
+              }}
+              onEditStart={beginContinuousEdit}
+              onEditEnd={finishContinuousEdit}
+              onExport={(format) => void handleExport(format)}
+            />
           </div>
         </aside>
       </div>
 
       <footer className="flex h-40 shrink-0 flex-col border-t border-[var(--border)] bg-[var(--panel)] sm:h-48 lg:h-52">
         <div className="flex h-9 shrink-0 items-center gap-3 border-b border-[var(--border)] px-3 text-[10px] text-[var(--muted)] sm:px-4">
-          <span><strong className="text-[var(--text)]">V1</strong> {t('video_track')}</span><span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('audio_track')}</span><span className="ml-auto truncate font-mono text-indigo-500">{activeClip ? `${t('active_trim')}: ${activeClip.trimStart.toFixed(1)}s – ${activeClip.trimEnd.toFixed(1)}s` : t('no_clip')}</span>
+          <span><strong className="text-[var(--text)]">V1</strong> {t('video_track')}</span><span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('audio_track')}</span><span className="ml-auto hidden font-mono sm:inline">{t('project_duration', { value: projectDuration.toFixed(1) })}</span><span className="truncate font-mono text-indigo-500">{activeClip ? `${t('active_trim')}: ${activeClip.trimStart.toFixed(1)}s – ${activeClip.trimEnd.toFixed(1)}s` : t('no_clip')}</span>
         </div>
         {state.clips.length ? (
           <div className="flex flex-1 items-center gap-2 overflow-x-auto p-3">

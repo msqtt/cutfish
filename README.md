@@ -7,7 +7,9 @@ Cutfish is a private, browser-based video editor powered by FFmpeg WebAssembly. 
 ## Highlights
 
 - **Private by design** — editing and rendering happen locally in the browser.
-- **Multi-clip workflow** — import multiple files, reorder or remove them, and export one video.
+- **Multi-clip workflow** — import multiple files, reorder or remove them, preview continuously, and export one video.
+- **Flexible export** — select any project timeline range, then choose 480p/720p/1080p, 24/30/60 fps, and compact/balanced/high quality with an estimated output size.
+- **Audio-compatible merging** — mix videos with or without audio; silent tracks are synthesized locally when needed.
 - **Precise editing** — trim ranges, real-time color preview, and ±5 second seeking.
 - **Local drafts** — source `File` objects and editor state are restored from IndexedDB.
 - **Fast startup** — the FFmpeg engine is loaded only when an export is requested.
@@ -29,7 +31,6 @@ Cutfish is a private, browser-based video editor powered by FFmpeg WebAssembly. 
 
 - Node.js 20.9 or newer (Node.js 22 is used on Netlify)
 - A current Chromium, Firefox, or Safari browser
-- Videos with an audio track for merged exports
 
 The first export downloads the FFmpeg core (roughly 30 MB) from unpkg by default. Set `NEXT_PUBLIC_FFMPEG_CORE_BASE_URL` to a directory containing the matching `ffmpeg-core.js` and `ffmpeg-core.wasm` files if you prefer to self-host it.
 
@@ -67,6 +68,6 @@ Media never leaves the device. The only runtime network request after loading th
 
 Production: <https://cutfish.msqt.fun>
 
-## Known limitation
+## Known limitations
 
-The current merge graph expects each imported video to contain an audio stream. Silent/video-only inputs should be given an audio track before export. Very large projects are constrained by browser memory because FFmpeg.wasm processes files locally.
+Very large projects remain constrained by browser memory because FFmpeg.wasm processes media locally. Export speed and codec compatibility depend on the browser, device, and FFmpeg.wasm build; the size estimate is advisory rather than an exact target.

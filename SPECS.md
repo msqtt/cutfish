@@ -11,9 +11,12 @@ Cutfish is a privacy-first browser video editor. Source files, drafts, and rende
 - Per-clip trim ranges and playback bounds
 - Global brightness, contrast, saturation, and audio delay
 - Multi-clip normalization and concatenation through FFmpeg.wasm
-- MP4 and WebM download, progress display, and cancellation
+- MP4 and WebM download with project-range selection, quality profiles, size estimates, progress, and cancellation
+- Audio-stream probing with duration-matched silence synthesis for video-only inputs
+- Sequential import and MEMFS preparation, with lightweight static media cards
 - IndexedDB draft persistence with `File` structured cloning and fresh object URLs on restore
 - English/Chinese UI, system/light/dark themes, mobile drawers, keyboard navigation
+- Continuous playback across the ordered trimmed clips
 
 ## 3. Component architecture
 
@@ -21,6 +24,7 @@ Cutfish is a privacy-first browser video editor. Source files, drafts, and rende
 app/layout.tsx             metadata, theme provider, global shell
 app/page.tsx               client-only editor boundary and loading state
 components/Editor.tsx      workflow orchestration and accessible UI
+components/ExportPanel.tsx project range, profile controls, and size estimate
 lib/history.ts             pure bounded history transitions + React adapter
 lib/ffmpeg-utils.ts        pure validated FFmpeg argument generation
 lib/i18n.ts                English and Chinese resources
@@ -46,10 +50,17 @@ interface EditorState {
   activeClipId: string | null;
   audioDelay: number;
   filters: { brightness: number; contrast: number; saturation: number };
+  exportSettings: {
+    resolution: '480p' | '720p' | '1080p';
+    frameRate: 24 | 30 | 60;
+    quality: 'compact' | 'balanced' | 'high';
+    rangeStart: number;
+    rangeEnd: number | null; // null tracks the current full project length
+  };
 }
 ```
 
-Import creates an object URL and reads duration before committing clips. Draft persistence strips URLs; restoration creates fresh URLs from persisted files. All created URLs are revoked on app teardown. Export lazily loads FFmpeg, writes files to MEMFS, runs a deterministic command, downloads output, and deletes temporary MEMFS files.
+Import creates one object URL and reads one duration at a time before committing clips, then requests persistent browser storage when available. Draft persistence strips URLs; restoration creates fresh URLs from persisted files and merges export defaults for older drafts. All created URLs are revoked on app teardown. Export lazily loads FFmpeg, maps the project range to source trims, sequentially writes only selected files, probes their audio streams, runs a deterministic profile-aware command, downloads output, and deletes temporary MEMFS files.
 
 ## 5. History policy
 
@@ -57,9 +68,25 @@ Discrete actions are pushed immediately. Slider movement uses transient replacem
 
 ## 6. Export policy
 
-Inputs are trimmed, normalized to 1280×720 / 30 fps / stereo 48 kHz, concatenated, filtered, audio-shifted, and encoded. Positive delay pads audio; negative delay trims its start. MP4 uses H.264/AAC with `faststart`; WebM uses VP9/Opus.
+### 6.1 Project range
 
-Current constraint: every input must include an audio stream. A future optional-audio design requires reliable stream probing before graph construction and must be specified/tested before implementation.
+Each clip keeps its own source trim range. The ordered trimmed clips form a project timeline starting at zero. Export settings add a second, project-level `[rangeStart, rangeEnd]` interval. Before files enter FFmpeg, a pure range-selection function intersects that interval with clip timeline spans, drops clips outside the interval, and translates boundary intersections back to source timestamps. This limits work and memory to media that contributes to the output.
+
+### 6.2 Quality and size controls
+
+Users can choose:
+
+- Resolution: 480p, 720p, or 1080p (16:9 normalization)
+- Frame rate: 24, 30, or 60 fps
+- Quality preset: compact, balanced, or high
+
+A pure profile resolver maps resolution and quality to explicit video/audio bitrates. The UI shows an approximate output size computed from selected duration and aggregate bitrate. This estimate is advisory because codec content complexity and container overhead vary.
+
+### 6.3 Audio compatibility and sync
+
+Inputs are probed after being written to FFmpeg MEMFS. Clips without an audio stream receive a duration-matched stereo silent source before concatenation. Positive audio delay pads the beginning. Negative delay trims the beginning and pads the end back to the selected video duration, preventing `-shortest` from truncating the picture.
+
+Inputs are loaded, probed, and written sequentially to reduce transient browser memory. Only files intersecting the project export range are written. MP4 uses H.264/AAC with `faststart`; WebM uses VP9/Opus.
 
 ## 7. Performance and security
 
