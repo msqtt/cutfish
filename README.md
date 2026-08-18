@@ -1,0 +1,72 @@
+# Cutfish
+
+[中文](README.zh-CN.md) · [Live site](https://cutfish.msqt.fun)
+
+Cutfish is a private, browser-based video editor powered by FFmpeg WebAssembly. Trim and reorder clips, merge multiple videos, adjust color, synchronize audio, and export MP4 or WebM without uploading media to a server.
+
+## Highlights
+
+- **Private by design** — editing and rendering happen locally in the browser.
+- **Multi-clip workflow** — import multiple files, reorder or remove them, and export one video.
+- **Precise editing** — trim ranges, real-time color preview, and ±5 second seeking.
+- **Local drafts** — source `File` objects and editor state are restored from IndexedDB.
+- **Fast startup** — the FFmpeg engine is loaded only when an export is requested.
+- **Accessible and responsive** — keyboard shortcuts, focus states, reduced-motion support, mobile panels, dark/light themes, and English/Chinese UI.
+- **Safe history** — undo/redo is capped and continuous slider edits create a single history entry.
+
+## Keyboard shortcuts
+
+| Action | Shortcut |
+| --- | --- |
+| Play / pause | `Space` |
+| Seek | `←` / `→` (5 seconds) |
+| Undo | `Ctrl/Cmd + Z` |
+| Redo | `Ctrl/Cmd + Shift + Z` or `Ctrl/Cmd + Y` |
+| Export MP4 | `Ctrl/Cmd + E` |
+| Delete selected clip | `Delete` / `Backspace` |
+
+## Requirements
+
+- Node.js 20.9 or newer (Node.js 22 is used on Netlify)
+- A current Chromium, Firefox, or Safari browser
+- Videos with an audio track for merged exports
+
+The first export downloads the FFmpeg core (roughly 30 MB) from unpkg by default. Set `NEXT_PUBLIC_FFMPEG_CORE_BASE_URL` to a directory containing the matching `ffmpeg-core.js` and `ffmpeg-core.wasm` files if you prefer to self-host it.
+
+## Development
+
+```bash
+npm install
+npm run dev
+```
+
+Open <http://localhost:3000>. No account, database, server-side media processor, or API key is required.
+
+Quality checks:
+
+```bash
+npm test
+npm run lint
+npm run typecheck
+npm run build
+```
+
+## Architecture
+
+- **Next.js App Router + React** for the application shell and responsive UI
+- **FFmpeg.wasm** for client-side trim, normalize, concatenate, filter, audio sync, and encode
+- **IndexedDB (`idb-keyval`)** for debounced local draft persistence
+- **Pure command/history modules** under `lib/`, covered by Vitest
+- **COOP/COEP headers** in both Next.js and Netlify configuration for WebAssembly isolation
+
+Media never leaves the device. The only runtime network request after loading the app is the FFmpeg core download unless you self-host it.
+
+## Deployment
+
+`netlify.toml` configures automatic Next.js builds and the required isolation/security headers. Connect the GitHub repository in Netlify and deploy the `main` branch; pushes then trigger production builds automatically.
+
+Production: <https://cutfish.msqt.fun>
+
+## Known limitation
+
+The current merge graph expects each imported video to contain an audio stream. Silent/video-only inputs should be given an audio track before export. Very large projects are constrained by browser memory because FFmpeg.wasm processes files locally.

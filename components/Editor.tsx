@@ -1,22 +1,20 @@
-"use client";
+'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
-import { useTranslation } from 'react-i18next';
-import { useTheme } from 'next-themes';
-import { set, get } from 'idb-keyval';
-import '@/lib/i18n';
-import { 
-  Upload, Scissors, Sliders, Volume2, Download, 
-  Sun, Moon, Monitor, Type, Play, Pause, FileVideo, 
-  RotateCcw, RotateCw, MonitorPlay, Undo2, Redo2, Plus
+import { del, get, set } from 'idb-keyval';
+import {
+  ChevronLeft, ChevronRight, Download, FileVideo, Moon, MonitorPlay, Pause,
+  Play, Plus, Redo2, RotateCcw, RotateCw, SlidersHorizontal, Sun, Trash2,
+  Undo2, Upload, X,
 } from 'lucide-react';
-
-import { useHistory } from '@/lib/history';
+import { useTheme } from 'next-themes';
+import { useTranslation } from 'react-i18next';
 import { buildFFmpegCommand } from '@/lib/ffmpeg-utils';
+import { useHistory } from '@/lib/history';
+import '@/lib/i18n';
 
-// --- Types ---
 export interface Clip {
   id: string;
   url: string;
@@ -24,548 +22,565 @@ export interface Clip {
   duration: number;
   trimStart: number;
   trimEnd: number;
-  file?: File; // Optional when loaded from IndexedDB draft (requires re-uploading theoretically, but blob urls might survive session)
+  file: File;
 }
 
 export interface EditorState {
   clips: Clip[];
   activeClipId: string | null;
   audioDelay: number;
-  filters: {
-    brightness: number;
-    contrast: number;
-    saturation: number;
+  filters: { brightness: number; contrast: number; saturation: number };
+}
+
+type DraftState = Omit<EditorState, 'clips'> & { clips: Array<Omit<Clip, 'url'>> };
+type MobilePanel = 'media' | 'inspector' | null;
+type Toast = { kind: 'success' | 'error'; message: string } | null;
+
+const DRAFT_KEY = 'cutfish-draft-v1';
+const DEFAULT_STATE: EditorState = {
+  clips: [], activeClipId: null, audioDelay: 0,
+  filters: { brightness: 100, contrast: 100, saturation: 100 },
+};
+const iconButton = 'rounded-md p-2 text-[var(--muted)] transition hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-30';
+
+interface RangeControlProps {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  unit?: string;
+  disabled?: boolean;
+  onChange: (value: number) => void;
+  onEditStart: () => void;
+  onEditEnd: () => void;
+}
+
+function RangeControl({
+  label, value, min, max, step = 1, unit = '%', disabled,
+  onChange, onEditStart, onEditEnd,
+}: RangeControlProps) {
+  return (
+    <label className="flex flex-col gap-1.5 text-xs text-[var(--muted)]">
+      <span className="flex justify-between gap-3"><span>{label}</span><output>{value.toFixed(step < 1 ? 1 : 0)}{unit}</output></span>
+      <input
+        type="range" aria-label={label} min={min} max={max} step={step} value={value} disabled={disabled}
+        onPointerDown={onEditStart} onPointerUp={onEditEnd} onKeyDown={onEditStart}
+        onKeyUp={onEditEnd} onBlur={onEditEnd} onChange={(event) => onChange(Number(event.target.value))}
+        className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-[var(--border)] accent-indigo-600 disabled:cursor-not-allowed disabled:opacity-40"
+      />
+    </label>
+  );
+}
+
+function getVideoDuration(url: string) {
+  return new Promise<number>((resolve, reject) => {
+    const video = document.createElement('video');
+    const cleanup = () => { video.removeAttribute('src'); video.load(); };
+    video.preload = 'metadata';
+    video.onloadedmetadata = () => {
+      const duration = video.duration;
+      cleanup();
+      if (Number.isFinite(duration) && duration > 0) resolve(duration);
+      else reject(new Error('Invalid duration'));
+    };
+    video.onerror = () => { cleanup(); reject(new Error('Unreadable video')); };
+    video.src = url;
+  });
+}
+
+function toDraftClip(clip: Clip): Omit<Clip, 'url'> {
+  return {
+    id: clip.id,
+    name: clip.name,
+    duration: clip.duration,
+    trimStart: clip.trimStart,
+    trimEnd: clip.trimEnd,
+    file: clip.file,
   };
 }
 
-const DEFAULT_STATE: EditorState = {
-  clips: [],
-  activeClipId: null,
-  audioDelay: 0,
-  filters: { brightness: 100, contrast: 100, saturation: 100 },
-};
-
 export default function Editor() {
   const { t, i18n } = useTranslation();
-  const { theme, setTheme, systemTheme } = useTheme();
+  const { resolvedTheme, setTheme } = useTheme();
+  const {
+    state, set: updateState, replace: replaceState, checkpoint, undo, redo,
+    canUndo, canRedo, reset,
+  } = useHistory<EditorState>(DEFAULT_STATE);
 
-  const [ffmpeg, setFfmpeg] = useState<FFmpeg | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [processing, setProcessing] = useState(false);
-  const [progress, setProgress] = useState(0);
-
-  const { state, set: updateState, undo, redo, canUndo, canRedo, reset } = useHistory<EditorState>(DEFAULT_STATE);
-  
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [processing, setProcessing] = useState(false);
+  const [processingStage, setProcessingStage] = useState<'loading' | 'rendering'>('loading');
+  const [progress, setProgress] = useState(0);
+  const [draftReady, setDraftReady] = useState(false);
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
+  const [toast, setToast] = useState<Toast>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const objectUrlsRef = useRef(new Set<string>());
+  const continuousEditRef = useRef<EditorState | null>(null);
+  const ffmpegRef = useRef<FFmpeg | null>(null);
+  const ffmpegLoadRef = useRef<Promise<FFmpeg> | null>(null);
+  const cancelRequestedRef = useRef(false);
 
-  const activeClip = state.clips.find(c => c.id === state.activeClipId);
+  const activeClip = state.clips.find((clip) => clip.id === state.activeClipId);
 
-  // Load FFmpeg
-  useEffect(() => {
-    const load = async () => {
-      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-      const ffmpeg = new FFmpeg();
-      ffmpeg.on('progress', ({ progress }) => {
-        setProgress(Math.max(0, Math.min(100, progress * 100)));
-      });
-      
-      try {
-        await ffmpeg.load({
-          coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-          wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-        });
-        setFfmpeg(ffmpeg);
-        setLoaded(true);
-      } catch (err) {
-        console.error("FFmpeg load failed", err);
-      }
-    };
-    load();
+  const createTrackedUrl = useCallback((file: Blob) => {
+    const url = URL.createObjectURL(file);
+    objectUrlsRef.current.add(url);
+    return url;
   }, []);
 
-  // Load Draft from IndexedDB
-  useEffect(() => {
-    const loadDraft = async () => {
-      const draft = await get('video-editor-draft');
-      if (draft && draft.clips && draft.clips.length > 0) {
-        // verify first blob is still accessible
-        try {
-          const res = await fetch(draft.clips[0].url);
-          if (res.ok) {
-            reset(draft);
-          }
-        } catch {
-          console.warn("Draft blob expired");
-        }
-      }
-    };
-    loadDraft();
-  }, [reset]);
+  useEffect(() => () => {
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    ffmpegRef.current?.terminate();
+  }, []);
 
-  // Auto-save draft
   useEffect(() => {
-    if (state.clips.length > 0) {
-      set('video-editor-draft', state).catch(console.error);
-    }
+    document.documentElement.lang = i18n.resolvedLanguage?.startsWith('zh') ? 'zh-CN' : 'en';
+  }, [i18n.resolvedLanguage]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const draft = await get<DraftState>(DRAFT_KEY);
+        if (!draft?.clips?.length || cancelled) return;
+        const clips = draft.clips
+          .filter((clip) => clip.file instanceof Blob)
+          .map((clip) => ({ ...clip, url: createTrackedUrl(clip.file) }));
+        if (clips.length && !cancelled) {
+          const activeClipId = clips.some((clip) => clip.id === draft.activeClipId)
+            ? draft.activeClipId : clips[0].id;
+          reset({ ...draft, clips, activeClipId });
+        }
+      } catch (error) {
+        console.error('Draft restore failed', error);
+      } finally {
+        if (!cancelled) setDraftReady(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [createTrackedUrl, reset]);
+
+  useEffect(() => {
+    if (!draftReady) return;
+    const timer = window.setTimeout(() => {
+      if (!state.clips.length) {
+        void del(DRAFT_KEY);
+        return;
+      }
+      const draft: DraftState = {
+        ...state,
+        clips: state.clips.map(toDraftClip),
+      };
+      void set(DRAFT_KEY, draft).catch((error) => console.error('Draft save failed', error));
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [draftReady, state]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 3500);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  const beginContinuousEdit = useCallback(() => {
+    if (!continuousEditRef.current) continuousEditRef.current = state;
   }, [state]);
 
-  const togglePlay = useCallback(() => {
-    if (videoRef.current && activeClip) {
-      if (isPlaying) {
-        videoRef.current.pause();
-      } else {
-        videoRef.current.play();
-      }
-      setIsPlaying(!isPlaying);
+  const finishContinuousEdit = useCallback(() => {
+    if (!continuousEditRef.current) return;
+    checkpoint(continuousEditRef.current);
+    continuousEditRef.current = null;
+  }, [checkpoint]);
+
+  const importFiles = useCallback(async (files: File[]) => {
+    const videos = files.filter((file) => file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|m4v|avi)$/i.test(file.name));
+    if (!videos.length) {
+      setToast({ kind: 'error', message: t('invalid_file') });
+      return;
     }
-  }, [isPlaying, activeClip]);
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && e.target === document.body) {
-        e.preventDefault();
-        togglePlay();
-      }
-      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
-        e.preventDefault();
-        if (e.shiftKey) redo();
-        else undo();
-      }
-      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') {
-        e.preventDefault();
-        redo();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay, undo, redo]);
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      const newClip: Clip = {
-        id: Math.random().toString(36).substring(7),
-        url,
-        name: file.name,
-        duration: 0, // will be set on metadata load
-        trimStart: 0,
-        trimEnd: 0,
-        file
-      };
-      
-      updateState(s => ({
-        ...s,
-        clips: [...s.clips, newClip],
-        activeClipId: newClip.id // Auto select new clip
-      }));
-    }
-    // reset input
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const handleLoadedMetadata = () => {
-    if (videoRef.current && activeClip) {
-      const dur = videoRef.current.duration;
-      // Only set duration if not already set (prevents history spam on re-renders)
-      if (activeClip.duration === 0) {
-        updateState(s => ({
-          ...s,
-          clips: s.clips.map(c => c.id === activeClip.id ? { ...c, duration: dur, trimEnd: dur } : c)
-        }));
-      }
-    }
-  };
-
-  const handleTimeUpdate = () => {
-    if (videoRef.current && activeClip) {
-      const time = videoRef.current.currentTime;
-      setCurrentTime(time);
-      if (time >= activeClip.trimEnd && isPlaying) {
-        videoRef.current.pause();
-        setIsPlaying(false);
-        videoRef.current.currentTime = activeClip.trimStart;
-      }
-    }
-  };
-
-  const updateFilter = (key: keyof EditorState['filters'], value: number) => {
-    updateState(s => ({
-      ...s,
-      filters: { ...s.filters, [key]: value }
-    }));
-  };
-
-  const updateActiveClip = (updates: Partial<Clip>) => {
-    if (!activeClip) return;
-    updateState(s => ({
-      ...s,
-      clips: s.clips.map(c => c.id === activeClip.id ? { ...c, ...updates } : c)
-    }));
-  };
-
-  const handleExport = async (format: 'mp4' | 'webm') => {
-    if (!ffmpeg || !loaded || state.clips.length === 0) return;
-    setProcessing(true);
-    setProgress(0);
-    try {
-      // Write files to FFmpeg memory
-      const metadataForFfmpeg = await Promise.all(state.clips.map(async (clip, idx) => {
-        const ext = clip.name.split('.').pop() || 'mp4';
-        const filename = `input_${idx}.${ext}`;
-        
-        // Use the original File object if available, otherwise fetch from blob URL
-        if (clip.file) {
-          await ffmpeg.writeFile(filename, await fetchFile(clip.file));
-        } else {
-          await ffmpeg.writeFile(filename, await fetchFile(clip.url));
-        }
-        
+    const clips = await Promise.all(videos.map(async (file) => {
+      const url = createTrackedUrl(file);
+      try {
+        const duration = await getVideoDuration(url);
         return {
-          id: clip.id,
-          filename,
-          trimStart: clip.trimStart,
-          trimEnd: clip.trimEnd
-        };
+          id: crypto.randomUUID(), url, name: file.name, duration,
+          trimStart: 0, trimEnd: duration, file,
+        } satisfies Clip;
+      } catch {
+        URL.revokeObjectURL(url);
+        objectUrlsRef.current.delete(url);
+        return null;
+      }
+    }));
+    const validClips = clips.filter((clip): clip is Clip => clip !== null);
+    if (!validClips.length) {
+      setToast({ kind: 'error', message: t('invalid_file') });
+      return;
+    }
+    updateState((current) => ({
+      ...current,
+      clips: [...current.clips, ...validClips],
+      activeClipId: validClips[0].id,
+    }));
+    setMobilePanel(null);
+  }, [createTrackedUrl, t, updateState]);
+
+  const removeClip = useCallback((id: string) => {
+    updateState((current) => {
+      const index = current.clips.findIndex((clip) => clip.id === id);
+      if (index < 0) return current;
+      const clips = current.clips.filter((clip) => clip.id !== id);
+      const activeClipId = current.activeClipId === id
+        ? (clips[Math.min(index, clips.length - 1)]?.id ?? null)
+        : current.activeClipId;
+      return { ...current, clips, activeClipId };
+    });
+  }, [updateState]);
+
+  const moveClip = useCallback((id: string, direction: -1 | 1) => {
+    updateState((current) => {
+      const index = current.clips.findIndex((clip) => clip.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.clips.length) return current;
+      const clips = [...current.clips];
+      [clips[index], clips[nextIndex]] = [clips[nextIndex], clips[index]];
+      return { ...current, clips };
+    });
+  }, [updateState]);
+
+  const togglePlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !activeClip) return;
+    if (video.paused) {
+      if (video.currentTime < activeClip.trimStart || video.currentTime >= activeClip.trimEnd) {
+        video.currentTime = activeClip.trimStart;
+      }
+      void video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+    } else {
+      video.pause();
+      setIsPlaying(false);
+    }
+  }, [activeClip]);
+
+  const seek = useCallback((seconds: number) => {
+    const video = videoRef.current;
+    if (!video || !activeClip) return;
+    video.currentTime = Math.min(activeClip.trimEnd, Math.max(activeClip.trimStart, video.currentTime + seconds));
+    setCurrentTime(video.currentTime);
+  }, [activeClip]);
+
+  const ensureFfmpeg = useCallback(async () => {
+    if (ffmpegRef.current) return ffmpegRef.current;
+    if (ffmpegLoadRef.current) return ffmpegLoadRef.current;
+
+    const instance = new FFmpeg();
+    ffmpegRef.current = instance;
+    instance.on('progress', ({ progress: value }) => setProgress(Math.max(0, Math.min(100, value * 100))));
+
+    const loadPromise = (async () => {
+      const baseURL = process.env.NEXT_PUBLIC_FFMPEG_CORE_BASE_URL
+        ?? 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+      await instance.load({
+        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      });
+      return instance;
+    })();
+    ffmpegLoadRef.current = loadPromise;
+
+    try {
+      return await loadPromise;
+    } catch (error) {
+      if (ffmpegRef.current === instance) ffmpegRef.current = null;
+      instance.terminate();
+      throw error;
+    } finally {
+      ffmpegLoadRef.current = null;
+    }
+  }, []);
+
+  const handleExport = useCallback(async (format: 'mp4' | 'webm') => {
+    if (!state.clips.length || processing) return;
+    setProcessing(true);
+    setProcessingStage('loading');
+    setProgress(0);
+    cancelRequestedRef.current = false;
+    let engine: FFmpeg | null = null;
+    const temporaryFiles: string[] = [];
+
+    try {
+      engine = await ensureFfmpeg();
+      if (cancelRequestedRef.current) return;
+      setProcessingStage('rendering');
+
+      const metadata = await Promise.all(state.clips.map(async (clip, index) => {
+        const extension = clip.name.split('.').pop()?.replace(/[^a-z0-9]/gi, '') || 'mp4';
+        const filename = `input-${index}.${extension}`;
+        temporaryFiles.push(filename);
+        await engine!.writeFile(filename, await fetchFile(clip.file));
+        return { id: clip.id, filename, trimStart: clip.trimStart, trimEnd: clip.trimEnd };
       }));
 
-      const args = buildFFmpegCommand(metadataForFfmpeg, state.filters, state.audioDelay, format);
-      
-      await ffmpeg.exec(args);
-      
-      const data = await ffmpeg.readFile(`output.${format}`);
-      const url = URL.createObjectURL(new Blob([data as any], { type: `video/${format}` }));
-      
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `exported_video.${format}`;
-      a.click();
-      
-    } catch (err) {
-      console.error(err);
-      alert(t('error'));
+      const exitCode = await engine.exec(buildFFmpegCommand(metadata, state.filters, state.audioDelay, format));
+      if (exitCode !== 0) throw new Error(`FFmpeg exited with code ${exitCode}`);
+      const outputName = `output.${format}`;
+      temporaryFiles.push(outputName);
+      const data = await engine.readFile(outputName);
+      if (typeof data === 'string') throw new Error('Unexpected text output');
+      const url = URL.createObjectURL(new Blob([data as unknown as BlobPart], { type: `video/${format}` }));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `cutfish-${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      setToast({ kind: 'success', message: t('success') });
+    } catch (error) {
+      if (!cancelRequestedRef.current) {
+        console.error('Export failed', error);
+        setToast({ kind: 'error', message: engine ? t('error') : t('engine_error') });
+      }
     } finally {
+      if (engine && !cancelRequestedRef.current) {
+        await Promise.all(temporaryFiles.map((filename) => engine!.deleteFile(filename).catch(() => undefined)));
+      }
       setProcessing(false);
       setProgress(0);
     }
+  }, [ensureFfmpeg, processing, state, t]);
+
+  const cancelExport = useCallback(() => {
+    cancelRequestedRef.current = true;
+    ffmpegRef.current?.terminate();
+    ffmpegRef.current = null;
+    ffmpegLoadRef.current = null;
+    setProcessing(false);
+    setProgress(0);
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const editing = target?.matches('input, textarea, select, button, [contenteditable="true"]');
+      if (event.code === 'Escape') setMobilePanel(null);
+      if (editing) return;
+      if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
+      if ((event.ctrlKey || event.metaKey) && event.code === 'KeyZ') {
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+      }
+      if ((event.ctrlKey || event.metaKey) && event.code === 'KeyY') { event.preventDefault(); redo(); }
+      if ((event.ctrlKey || event.metaKey) && event.code === 'KeyE') { event.preventDefault(); void handleExport('mp4'); }
+      if ((event.code === 'Delete' || event.code === 'Backspace') && activeClip) removeClip(activeClip.id);
+      if (event.code === 'ArrowLeft') seek(-5);
+      if (event.code === 'ArrowRight') seek(5);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeClip, handleExport, redo, removeClip, seek, togglePlay, undo]);
+
+  const updateFilter = (key: keyof EditorState['filters'], value: number) => {
+    replaceState((current) => ({ ...current, filters: { ...current.filters, [key]: value } }));
   };
 
-  // Preview CSS Filters
+  const updateTrim = (key: 'trimStart' | 'trimEnd', value: number) => {
+    if (!activeClip) return;
+    if (key === 'trimStart') {
+      const video = videoRef.current;
+      if (video) {
+        video.pause();
+        video.currentTime = value;
+      }
+      setIsPlaying(false);
+      setCurrentTime(value);
+    }
+    replaceState((current) => ({
+      ...current,
+      clips: current.clips.map((clip) => clip.id === activeClip.id ? { ...clip, [key]: value } : clip),
+    }));
+  };
+
   const previewStyle = {
-    filter: `brightness(${state.filters.brightness}%) contrast(${state.filters.contrast}%) saturate(${state.filters.saturation}%)`
+    filter: `brightness(${state.filters.brightness}%) contrast(${state.filters.contrast}%) saturate(${state.filters.saturation}%)`,
   };
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-[#0a0a0a] text-[#e5e7eb] font-sans">
-      {/* HEADER */}
-      <header className="h-12 border-b border-[#222] flex items-center justify-between px-4 shrink-0 bg-[#111]">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 font-semibold text-lg">
-            <MonitorPlay className="w-5 h-5 text-indigo-500" />
-            <h1 className="text-sm font-semibold tracking-tight">{t('app_title')} <span className="text-[10px] text-indigo-400 font-mono ml-2 border border-indigo-900 px-1 rounded">WASM POWERED</span></h1>
+    <div className="flex h-dvh min-h-[560px] flex-col overflow-hidden bg-[var(--app)] text-[var(--text)]">
+      <input
+        ref={fileInputRef} type="file" accept="video/*" multiple className="sr-only"
+        onChange={(event) => { void importFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }}
+      />
+
+      <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--panel)] px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+          <div className="flex min-w-0 items-center gap-2 font-semibold">
+            <MonitorPlay className="h-5 w-5 shrink-0 text-indigo-500" aria-hidden="true" />
+            <h1 className="truncate text-sm">{t('app_title')}</h1>
+            <span className="hidden rounded border border-indigo-500/30 px-1.5 py-0.5 text-[9px] font-medium text-indigo-500 sm:inline">{t('wasm_powered')}</span>
           </div>
-          <div className="flex items-center gap-2 border-l border-[#333] pl-4 ml-2">
-            <button onClick={undo} disabled={!canUndo} className="p-1.5 hover:bg-[#222] rounded text-gray-400 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent transition-colors" title={t('undo') + " (Ctrl+Z)"}>
-              <Undo2 className="w-4 h-4" />
-            </button>
-            <button onClick={redo} disabled={!canRedo} className="p-1.5 hover:bg-[#222] rounded text-gray-400 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent transition-colors" title={t('redo') + " (Ctrl+Y)"}>
-              <Redo2 className="w-4 h-4" />
-            </button>
+          <div className="flex items-center border-l border-[var(--border)] pl-2 sm:pl-4">
+            <button onClick={undo} disabled={!canUndo} className={iconButton} aria-label={`${t('undo')} (Ctrl+Z)`} title={`${t('undo')} (Ctrl+Z)`}><Undo2 className="h-4 w-4" /></button>
+            <button onClick={redo} disabled={!canRedo} className={iconButton} aria-label={`${t('redo')} (Ctrl+Y)`} title={`${t('redo')} (Ctrl+Y)`}><Redo2 className="h-4 w-4" /></button>
           </div>
         </div>
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2 text-[11px] text-gray-400">
-            <span className="w-2 h-2 bg-green-500 rounded-full"></span>
-            <span>Auto-save enabled</span>
-          </div>
-          <div className="flex gap-3 items-center">
-            <button 
-              onClick={() => i18n.changeLanguage(i18n.language.startsWith('zh') ? 'en' : 'zh')}
-              className="text-[11px] hover:text-white border border-[#333] px-3 py-1 rounded transition-colors"
-            >
-              {i18n.language.startsWith('zh') ? 'EN' : '中文'}
-            </button>
-            <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="text-[11px] hover:text-white border border-[#333] px-2 py-1 rounded transition-colors flex items-center justify-center">
-              {theme === 'dark' ? <Sun className="w-3 h-3" /> : <Moon className="w-3 h-3" />}
-            </button>
-          </div>
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-3">
+          <span className="hidden items-center gap-2 text-[11px] text-[var(--muted)] md:flex"><span className="h-2 w-2 rounded-full bg-emerald-500" />{t('auto_save')}</span>
+          <button onClick={() => setMobilePanel('media')} className={`${iconButton} lg:hidden`} aria-label={t('media_assets')}><FileVideo className="h-4 w-4" /></button>
+          <button onClick={() => setMobilePanel('inspector')} className={`${iconButton} lg:hidden`} aria-label={t('inspector')}><SlidersHorizontal className="h-4 w-4" /></button>
+          <button onClick={() => void i18n.changeLanguage(i18n.resolvedLanguage?.startsWith('zh') ? 'en' : 'zh')} className="rounded-md border border-[var(--border)] px-2.5 py-1.5 text-[11px] hover:bg-[var(--raised)]" aria-label={t('language')}>{i18n.resolvedLanguage?.startsWith('zh') ? 'EN' : '中文'}</button>
+          <button onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')} className={iconButton} aria-label={resolvedTheme === 'dark' ? t('light_mode') : t('dark_mode')} title={resolvedTheme === 'dark' ? t('light_mode') : t('dark_mode')}>{resolvedTheme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}</button>
         </div>
       </header>
 
-      {/* MAIN WORKSPACE */}
-      <div className="flex flex-1 overflow-hidden">
-        
-        {/* LEFT SIDEBAR - MEDIA ASSETS */}
-        <aside className="w-64 border-r border-[#222] bg-[#0d0d0d] flex flex-col shrink-0">
-          <div className="p-3 border-b border-[#222] flex justify-between items-center">
-            <span className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Media Assets</span>
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="text-indigo-400 text-xs hover:text-indigo-300 flex items-center gap-1"
-            >
-              <Plus className="w-3 h-3" /> Import
-            </button>
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {mobilePanel && <button className="absolute inset-0 z-20 bg-black/50 lg:hidden" onClick={() => setMobilePanel(null)} aria-label={t('close')} />}
+
+        <aside className={`absolute inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)] transition-transform lg:static lg:w-64 lg:translate-x-0 ${mobilePanel === 'media' ? 'translate-x-0' : '-translate-x-full'}`} aria-label={t('media_assets')}>
+          <div className="flex h-11 items-center justify-between border-b border-[var(--border)] px-3">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--muted)]">{t('media_assets')}</span>
+            <div className="flex items-center gap-1">
+              <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10"><Plus className="h-3.5 w-3.5" />{t('import')}</button>
+              <button onClick={() => setMobilePanel(null)} className={`${iconButton} lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
+            </div>
           </div>
-          <div className="flex-1 p-2 space-y-2 overflow-y-auto">
-            {state.clips.map((clip, idx) => (
-              <div 
-                key={clip.id} 
-                onClick={() => updateState(s => ({ ...s, activeClipId: clip.id }))}
-                className={`p-2 rounded border cursor-pointer transition-colors ${
-                  state.activeClipId === clip.id 
-                  ? 'bg-[#1a1a1a] border-indigo-900/50 ring-1 ring-indigo-500/20' 
-                  : 'bg-[#1a1a1a] border-[#333] hover:border-gray-500 opacity-80 hover:opacity-100'
-                }`}
-              >
-                <div className="aspect-video bg-[#222] rounded mb-1 flex items-center justify-center text-[10px] text-gray-600 relative overflow-hidden">
-                  <video src={clip.url} className="absolute inset-0 w-full h-full object-cover opacity-50" />
-                  <span className="relative z-10 bg-black/60 px-1 rounded">{clip.duration.toFixed(1)}s</span>
+          <div className="flex-1 space-y-2 overflow-y-auto p-2">
+            {state.clips.map((clip, index) => (
+              <div key={clip.id} className={`group relative rounded-lg border p-1.5 transition ${state.activeClipId === clip.id ? 'border-indigo-500 bg-indigo-500/10' : 'border-[var(--border)] bg-[var(--raised)] hover:border-indigo-400'}`}>
+                <button onClick={() => { replaceState((current) => ({ ...current, activeClipId: clip.id })); setMobilePanel(null); }} className="block w-full rounded text-left" aria-pressed={state.activeClipId === clip.id}>
+                  <span className="relative flex aspect-video items-center justify-center overflow-hidden rounded bg-[var(--canvas)]">
+                    <video src={clip.url} muted preload="metadata" className="absolute inset-0 h-full w-full object-cover opacity-60" />
+                    <span className="relative rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">{t('duration', { value: clip.duration.toFixed(1) })}</span>
+                  </span>
+                  <span className="mt-1 block truncate px-0.5 text-[11px]">{clip.name}</span>
+                </button>
+                <div className="mt-1 flex justify-end gap-0.5 border-t border-[var(--border)] pt-1">
+                  <button onClick={() => moveClip(clip.id, -1)} disabled={index === 0} className={iconButton} aria-label={t('move_left')} title={t('move_left')}><ChevronLeft className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => moveClip(clip.id, 1)} disabled={index === state.clips.length - 1} className={iconButton} aria-label={t('move_right')} title={t('move_right')}><ChevronRight className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => removeClip(clip.id)} className={`${iconButton} hover:text-red-500`} aria-label={`${t('delete')} ${clip.name}`} title={t('delete')}><Trash2 className="h-3.5 w-3.5" /></button>
                 </div>
-                <p className={`text-[10px] truncate ${state.activeClipId === clip.id ? 'text-indigo-300' : 'text-gray-400'}`}>
-                  {clip.name}
-                </p>
               </div>
             ))}
-            
-            {state.clips.length === 0 && (
-              <div className="text-center p-4 text-[10px] text-gray-500 border border-dashed border-[#333] rounded mt-2">
-                No assets imported.<br/>Click + Import to start.
-              </div>
-            )}
+            {!state.clips.length && <p className="m-2 rounded-lg border border-dashed border-[var(--border)] p-5 text-center text-xs leading-5 text-[var(--muted)]">{t('no_assets')}</p>}
           </div>
         </aside>
 
-        {/* PREVIEW AREA */}
-        <section className="flex-1 flex flex-col bg-[#000] relative">
-          <div className="flex-1 flex items-center justify-center p-8">
+        <section className="relative flex min-w-0 flex-1 flex-col bg-[var(--canvas)]" aria-label={t('preview')}>
+          <div
+            className={`flex min-h-0 flex-1 items-center justify-center p-3 transition sm:p-5 lg:p-8 ${isDragging ? 'bg-indigo-500/15' : ''}`}
+            onDragEnter={(event) => { event.preventDefault(); setIsDragging(true); }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={(event) => { if (event.currentTarget === event.target) setIsDragging(false); }}
+            onDrop={(event) => { event.preventDefault(); setIsDragging(false); void importFiles(Array.from(event.dataTransfer.files)); }}
+          >
             {!activeClip ? (
-              <div className="relative w-full max-w-2xl aspect-video bg-[#050505] shadow-2xl rounded-lg overflow-hidden border border-[#222] flex items-center justify-center flex-col gap-4 group hover:border-indigo-500 transition-colors cursor-pointer" onClick={() => fileInputRef.current?.click()}>
-                <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle,rgba(79,70,229,0.2)_0%,transparent_70%)] pointer-events-none"></div>
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
-                  className="hidden" 
-                  accept="video/*" 
-                  onChange={handleFileUpload} 
-                />
-                <div className="w-12 h-12 rounded-full border-2 border-white/20 flex items-center justify-center group-hover:border-indigo-500 transition-colors z-10 relative">
-                  <Upload className="w-5 h-5 text-gray-400 group-hover:text-indigo-400" />
-                </div>
-                <div className="text-center z-10 relative">
-                  <p className="font-medium text-sm text-gray-300">{t('upload_media')}</p>
-                  <p className="text-[10px] text-gray-500 mt-1">{t('drop_here')}</p>
-                </div>
-              </div>
+              <button onClick={() => fileInputRef.current?.click()} className="group relative flex aspect-video w-full max-w-3xl flex-col items-center justify-center gap-4 overflow-hidden rounded-xl border border-dashed border-[var(--border)] bg-[var(--panel)] p-6 shadow-xl transition hover:border-indigo-500" aria-label={t('upload_media')}>
+                <span className="flex h-14 w-14 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--raised)] transition group-hover:border-indigo-500"><Upload className="h-6 w-6 text-indigo-500" /></span>
+                <span className="text-center"><strong className="block text-sm">{t('upload_media')}</strong><span className="mt-1 block text-xs text-[var(--muted)]">{t('drop_here')}</span></span>
+              </button>
             ) : (
-              <div className="relative w-full max-w-2xl aspect-video bg-[#050505] shadow-2xl rounded-lg overflow-hidden border border-[#222] flex items-center justify-center">
-                <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle,rgba(79,70,229,0.2)_0%,transparent_70%)] pointer-events-none"></div>
-                <video 
-                  ref={videoRef}
-                  src={activeClip.url}
-                  className="max-h-full max-w-full object-contain relative z-10"
-                  style={previewStyle}
-                  onLoadedMetadata={handleLoadedMetadata}
-                  onTimeUpdate={handleTimeUpdate}
-                  onClick={togglePlay}
+              <div className="relative flex aspect-video w-full max-w-3xl items-center justify-center overflow-hidden rounded-xl border border-[var(--border)] bg-black shadow-2xl">
+                <video
+                  key={activeClip.id} ref={videoRef} src={activeClip.url} playsInline
+                  className="relative z-10 max-h-full max-w-full object-contain" style={previewStyle}
+                  onLoadedMetadata={(event) => {
+                    event.currentTarget.currentTime = activeClip.trimStart;
+                    setCurrentTime(activeClip.trimStart);
+                    setIsPlaying(false);
+                  }}
+                  onTimeUpdate={(event) => {
+                    const time = event.currentTarget.currentTime;
+                    setCurrentTime(time);
+                    if (time >= activeClip.trimEnd) {
+                      event.currentTarget.pause(); event.currentTarget.currentTime = activeClip.trimStart; setIsPlaying(false);
+                    }
+                  }}
+                  onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onClick={togglePlay}
                 />
-                
-                {/* Time Overlay */}
-                <div className="absolute top-4 left-4 px-2 py-1 bg-black/60 rounded text-[10px] font-mono z-20 text-gray-300">
-                  {currentTime.toFixed(2)}s / {activeClip.duration.toFixed(2)}s
-                </div>
+                <span className="absolute left-3 top-3 z-20 rounded bg-black/70 px-2 py-1 font-mono text-[10px] text-white" aria-live="off">{currentTime.toFixed(2)}s / {activeClip.duration.toFixed(2)}s</span>
               </div>
             )}
           </div>
 
-          {/* PLAYBACK CONTROLS BAR */}
-          <div className="h-12 bg-[#111] border-t border-[#222] flex items-center justify-center gap-6 shrink-0">
-            <button className="p-2 hover:bg-[#222] rounded text-gray-400 hover:text-white transition-colors">
-              <RotateCcw className="w-4 h-4" />
-            </button>
-            <button onClick={togglePlay} disabled={!activeClip} className="w-10 h-10 bg-white text-black rounded-full flex items-center justify-center text-lg disabled:opacity-50 hover:scale-105 transition-transform">
-              {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-1" />}
-            </button>
-            <button className="p-2 hover:bg-[#222] rounded text-gray-400 hover:text-white transition-colors">
-              <RotateCw className="w-4 h-4" />
-            </button>
+          <div className="flex h-14 shrink-0 items-center justify-center gap-5 border-t border-[var(--border)] bg-[var(--panel)]">
+            <button onClick={() => seek(-5)} disabled={!activeClip} className={iconButton} aria-label={t('back_five')} title={t('back_five')}><RotateCcw className="h-4 w-4" /></button>
+            <button onClick={togglePlay} disabled={!activeClip} className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--text)] text-[var(--panel)] transition hover:scale-105 disabled:cursor-not-allowed disabled:opacity-40" aria-label={isPlaying ? t('pause') : t('play')}>{isPlaying ? <Pause className="h-5 w-5" /> : <Play className="ml-0.5 h-5 w-5" />}</button>
+            <button onClick={() => seek(5)} disabled={!activeClip} className={iconButton} aria-label={t('forward_five')} title={t('forward_five')}><RotateCw className="h-4 w-4" /></button>
           </div>
 
-          {/* Processing Overlay */}
           {processing && (
-            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center">
-              <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-              <p className="font-medium text-lg mb-2 text-white">{t('exporting')}</p>
-              <div className="w-64 h-2 bg-[#222] rounded-full overflow-hidden">
-                <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${progress}%` }}></div>
-              </div>
-              <p className="text-sm text-gray-500 mt-2 font-mono">{progress.toFixed(0)}%</p>
+            <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-black/80 px-4 text-white backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={processingStage === 'loading' ? t('loading_engine') : t('exporting')}>
+              <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-indigo-400 border-t-transparent" />
+              <p className="mb-3 text-lg font-medium">{processingStage === 'loading' ? t('loading_engine') : t('exporting')}</p>
+              {processingStage === 'rendering' && <><div className="h-2 w-full max-w-xs overflow-hidden rounded-full bg-white/20"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${progress}%` }} /></div><p className="mt-2 font-mono text-sm text-white/70">{progress.toFixed(0)}%</p></>}
+              <button onClick={cancelExport} className="mt-5 rounded-md border border-white/30 px-4 py-2 text-sm hover:bg-white/10">{t('cancel')}</button>
             </div>
           )}
         </section>
 
-        {/* RIGHT SIDEBAR - CONTROLS */}
-        <aside className="w-72 border-l border-[#222] bg-[#0d0d0d] flex flex-col shrink-0 overflow-y-auto">
-          <div className="p-3 border-b border-[#222] text-[10px] uppercase tracking-widest font-bold text-gray-500">
-            Inspector
-          </div>
-          
-          <div className="p-4 space-y-6 flex-1">
-            <div>
-              <label className="text-[11px] text-gray-400 block mb-2">{t('filters')} (Global)</label>
+        <aside className={`absolute inset-y-0 right-0 z-30 flex w-80 shrink-0 flex-col overflow-y-auto border-l border-[var(--border)] bg-[var(--panel)] transition-transform lg:static lg:w-72 lg:translate-x-0 ${mobilePanel === 'inspector' ? 'translate-x-0' : 'translate-x-full'}`} aria-label={t('inspector')}>
+          <div className="flex h-11 shrink-0 items-center justify-between border-b border-[var(--border)] px-3 text-[10px] font-bold uppercase tracking-widest text-[var(--muted)]"><span>{t('inspector')}</span><button onClick={() => setMobilePanel(null)} className={`${iconButton} lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button></div>
+          <div className="flex-1 space-y-7 p-4">
+            <section aria-labelledby="trim-heading">
+              <h2 id="trim-heading" className="mb-3 text-xs font-medium">{t('trim')}</h2>
               <div className="space-y-4">
-                <label className="flex flex-col gap-1">
-                  <div className="flex justify-between text-[10px] text-gray-400">
-                    <span>{t('brightness')}</span>
-                    <span>{state.filters.brightness}%</span>
-                  </div>
-                  <input 
-                    type="range" min="0" max="200" 
-                    value={state.filters.brightness}
-                    onChange={(e) => updateFilter('brightness', Number(e.target.value))}
-                    className="w-full accent-indigo-500 bg-[#333] h-1 rounded-lg cursor-pointer appearance-none"
-                  />
-                </label>
-                
-                <label className="flex flex-col gap-1">
-                  <div className="flex justify-between text-[10px] text-gray-400">
-                    <span>{t('contrast')}</span>
-                    <span>{state.filters.contrast}%</span>
-                  </div>
-                  <input 
-                    type="range" min="0" max="200" 
-                    value={state.filters.contrast}
-                    onChange={(e) => updateFilter('contrast', Number(e.target.value))}
-                    className="w-full accent-indigo-500 bg-[#333] h-1 rounded-lg cursor-pointer appearance-none"
-                  />
-                </label>
-
-                <label className="flex flex-col gap-1">
-                  <div className="flex justify-between text-[10px] text-gray-400">
-                    <span>{t('saturation')}</span>
-                    <span>{state.filters.saturation}%</span>
-                  </div>
-                  <input 
-                    type="range" min="0" max="200" 
-                    value={state.filters.saturation}
-                    onChange={(e) => updateFilter('saturation', Number(e.target.value))}
-                    className="w-full accent-indigo-500 bg-[#333] h-1 rounded-lg cursor-pointer appearance-none"
-                  />
-                </label>
+                <RangeControl label={t('trim_start')} value={activeClip?.trimStart ?? 0} min={0} max={Math.max(0, (activeClip?.trimEnd ?? 0) - 0.1)} step={0.1} unit="s" disabled={!activeClip} onChange={(value) => updateTrim('trimStart', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                <RangeControl label={t('trim_end')} value={activeClip?.trimEnd ?? 0} min={Math.min(activeClip?.duration ?? 0, (activeClip?.trimStart ?? 0) + 0.1)} max={activeClip?.duration ?? 0} step={0.1} unit="s" disabled={!activeClip} onChange={(value) => updateTrim('trimEnd', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
               </div>
-            </div>
-
-            <div>
-              <label className="text-[11px] text-gray-400 block mb-2">{t('audio_sync')} (Global)</label>
-              <input 
-                type="range" min="-5000" max="5000" step="100"
-                value={state.audioDelay}
-                onChange={(e) => updateState(s => ({ ...s, audioDelay: Number(e.target.value) }))}
-                className="w-full accent-indigo-500 bg-[#333] h-1 rounded-lg cursor-pointer appearance-none"
-              />
-              <div className="flex justify-between text-[9px] mt-1 text-gray-500">
-                <span>-5000ms</span>
-                <span>{state.audioDelay}ms</span>
-                <span>+5000ms</span>
+            </section>
+            <section aria-labelledby="filters-heading">
+              <h2 id="filters-heading" className="mb-3 text-xs font-medium">{t('filters')} <span className="text-[var(--muted)]">· {t('global')}</span></h2>
+              <div className="space-y-4">
+                <RangeControl label={t('brightness')} value={state.filters.brightness} min={0} max={200} onChange={(value) => updateFilter('brightness', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                <RangeControl label={t('contrast')} value={state.filters.contrast} min={0} max={200} onChange={(value) => updateFilter('contrast', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                <RangeControl label={t('saturation')} value={state.filters.saturation} min={0} max={200} onChange={(value) => updateFilter('saturation', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
               </div>
-            </div>
-            
-            <div>
-              <label className="text-[11px] text-gray-400 block mb-2">WASM Encoder Output</label>
-              <div className="flex gap-2">
-                <button 
-                  onClick={() => handleExport('mp4')}
-                  disabled={state.clips.length === 0 || !loaded || processing}
-                  className="flex-1 p-2 bg-[#1a1a1a] border border-[#333] hover:border-indigo-500 text-[10px] rounded transition-colors disabled:opacity-50 disabled:hover:border-[#333]"
-                >
-                  Export MP4
-                </button>
-                <button 
-                  onClick={() => handleExport('webm')}
-                  disabled={state.clips.length === 0 || !loaded || processing}
-                  className="flex-1 p-2 bg-[#1a1a1a] border border-[#333] hover:border-indigo-500 text-[10px] rounded transition-colors disabled:opacity-50 disabled:hover:border-[#333]"
-                >
-                  Export WebM
-                </button>
+            </section>
+            <section aria-labelledby="audio-heading">
+              <h2 id="audio-heading" className="mb-3 text-xs font-medium">{t('audio_sync')} <span className="text-[var(--muted)]">· {t('global')}</span></h2>
+              <RangeControl label={t('audio_sync')} value={state.audioDelay} min={-5000} max={5000} step={100} unit="ms" onChange={(value) => replaceState((current) => ({ ...current, audioDelay: value }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+            </section>
+            <section aria-labelledby="export-heading">
+              <h2 id="export-heading" className="mb-3 text-xs font-medium">{t('export')}</h2>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => void handleExport('mp4')} disabled={!state.clips.length || processing} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_mp4')}</button>
+                <button onClick={() => void handleExport('webm')} disabled={!state.clips.length || processing} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_webm')}</button>
               </div>
-              {!loaded && (
-                <p className="text-[9px] text-indigo-400 text-center animate-pulse mt-2">{t('loading_ffmpeg')}</p>
-              )}
-            </div>
+            </section>
           </div>
         </aside>
       </div>
 
-      {/* BOTTOM TIMELINE */}
-      <footer className="h-56 border-t border-[#222] bg-[#0d0d0d] flex flex-col shrink-0">
-        <div className="h-8 border-b border-[#222] flex items-center px-4 gap-4 text-[10px] text-gray-500 shrink-0">
-          <div className="flex items-center gap-1"><span className="text-white">V1</span> <span>Video Track</span></div>
-          <div className="flex items-center gap-1"><span className="text-white">A1</span> <span>Audio Track</span></div>
-          <div className="flex-1"></div>
-          <div className="flex gap-4">
-            <span className="font-mono text-indigo-400">
-              {activeClip ? `Active Trim: ${activeClip.trimStart.toFixed(1)}s - ${activeClip.trimEnd.toFixed(1)}s` : 'No clip selected'}
-            </span>
-          </div>
+      <footer className="flex h-40 shrink-0 flex-col border-t border-[var(--border)] bg-[var(--panel)] sm:h-48 lg:h-52">
+        <div className="flex h-9 shrink-0 items-center gap-3 border-b border-[var(--border)] px-3 text-[10px] text-[var(--muted)] sm:px-4">
+          <span><strong className="text-[var(--text)]">V1</strong> {t('video_track')}</span><span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('audio_track')}</span><span className="ml-auto truncate font-mono text-indigo-500">{activeClip ? `${t('active_trim')}: ${activeClip.trimStart.toFixed(1)}s – ${activeClip.trimEnd.toFixed(1)}s` : t('no_clip')}</span>
         </div>
-        
-        {state.clips.length > 0 ? (
-          <div className="flex-1 overflow-x-auto flex relative p-2">
-            <div className="min-w-full flex gap-2 h-full pt-4 relative pb-6">
-              {/* Timeline Tracks */}
-              {state.clips.map((clip, index) => (
-                <div key={clip.id} className="relative h-12 shrink-0 bg-[#1a1a1a] rounded border border-[#333] overflow-hidden top-6" style={{ width: `${Math.max(clip.duration * 10, 150)}px` }}>
-                  <div 
-                    className={`absolute top-0 bottom-0 border-l border-r flex items-center px-2 text-[9px] font-mono transition-colors ${state.activeClipId === clip.id ? 'bg-indigo-900/40 border-indigo-400 text-indigo-200 z-10' : 'bg-[#222] border-[#444] text-gray-500 cursor-pointer'}`}
-                    style={{ 
-                      left: `${(clip.trimStart / Math.max(clip.duration, 0.1)) * 100}%`,
-                      right: `${100 - (clip.trimEnd / Math.max(clip.duration, 0.1)) * 100}%` 
-                    }}
-                    onClick={() => updateState(s => ({ ...s, activeClipId: clip.id }))}
-                  >
-                    <span className="truncate">{clip.name}</span>
-                  </div>
-                  
-                  {/* Show trim handles only for active clip */}
-                  {state.activeClipId === clip.id && (
-                    <>
-                      <input 
-                        type="range" min="0" max={clip.duration} step="0.1"
-                        value={clip.trimStart}
-                        onChange={(e) => {
-                          const val = Number(e.target.value);
-                          if (val < clip.trimEnd) updateActiveClip({ trimStart: val });
-                        }}
-                        className="absolute inset-0 h-full w-full z-20 opacity-0 cursor-ew-resize pointer-events-auto"
-                      />
-                      <input 
-                        type="range" min="0" max={clip.duration} step="0.1"
-                        value={clip.trimEnd}
-                        onChange={(e) => {
-                          const val = Number(e.target.value);
-                          if (val > clip.trimStart) updateActiveClip({ trimEnd: val });
-                        }}
-                        className="absolute inset-0 h-full w-full z-20 opacity-0 cursor-ew-resize pointer-events-auto"
-                      />
-                    </>
-                  )}
-                </div>
-              ))}
-              
-              {/* Global Time ticks (Simplified) */}
-              <div className="absolute bottom-0 left-0 right-0 border-t border-[#222] pt-1 pointer-events-none" />
-            </div>
+        {state.clips.length ? (
+          <div className="flex flex-1 items-center gap-2 overflow-x-auto p-3">
+            {state.clips.map((clip) => {
+              const duration = Math.max(clip.duration, 0.1);
+              return (
+                <button key={clip.id} onClick={() => replaceState((current) => ({ ...current, activeClipId: clip.id }))} className={`relative h-16 shrink-0 overflow-hidden rounded-md border bg-[var(--raised)] text-left ${state.activeClipId === clip.id ? 'border-indigo-500' : 'border-[var(--border)]'}`} style={{ width: `${Math.max(160, clip.duration * 12)}px` }} aria-label={clip.name}>
+                  <span className="absolute inset-y-0 bg-indigo-500/25" style={{ left: `${clip.trimStart / duration * 100}%`, right: `${100 - clip.trimEnd / duration * 100}%` }} />
+                  <span className="absolute inset-y-0 w-1 bg-indigo-500" style={{ left: `${clip.trimStart / duration * 100}%` }} />
+                  <span className="absolute inset-y-0 w-1 bg-indigo-500" style={{ left: `calc(${clip.trimEnd / duration * 100}% - 4px)` }} />
+                  <span className="relative block truncate px-3 text-[10px]">{clip.name}</span>
+                </button>
+              );
+            })}
           </div>
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-xs text-gray-600">
-            {t('no_media')}
-          </div>
-        )}
+        ) : <div className="flex flex-1 items-center justify-center text-xs text-[var(--muted)]">{t('no_media')}</div>}
       </footer>
+
+      {toast && <div className={`fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg px-4 py-2.5 text-sm text-white shadow-xl ${toast.kind === 'success' ? 'bg-emerald-600' : 'bg-red-600'}`} role="status" aria-live="polite">{toast.message}</div>}
     </div>
   );
 }

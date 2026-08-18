@@ -1,6 +1,6 @@
 {
-  "name": "WebWasm Video Editor",
-  "description": "A purely client-side video editor powered by WebAssembly. Features trimming, filtering, multi-format export, and local draft saving.",
+  "name": "Cutfish",
+  "description": "A private browser video editor for trimming, merging, filtering, audio sync, and local WebAssembly export.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": ["CLIENT_SIDE_VIDEO_EDITING", "LOCAL_DRAFT_PERSISTENCE", "FFMPEG_WASM_EXPORT"]
 }
