@@ -9,7 +9,7 @@ Cutfish is a privacy-first browser video editor. Source files, drafts, and rende
 - Multi-file import by picker or drag and drop
 - Media library with selection, ordering, deletion, and undo/redo
 - Per-clip trim ranges and playback bounds
-- Global brightness, contrast, saturation, and audio delay
+- Global brightness, contrast, saturation, audio delay, and configurable fade-in/fade-out
 - Multi-clip normalization and concatenation through FFmpeg.wasm
 - MP4 and WebM download with project-range selection, quality profiles, size estimates, progress, and cancellation
 - Audio-stream probing with duration-matched silence synthesis for video-only inputs
@@ -49,6 +49,10 @@ interface EditorState {
   clips: Clip[];
   activeClipId: string | null;
   audioDelay: number;
+  audioFade: {
+    fadeIn: number;  // seconds, global export effect
+    fadeOut: number; // seconds, global export effect
+  };
   filters: { brightness: number; contrast: number; saturation: number };
   exportSettings: {
     resolution: '480p' | '720p' | '1080p';
@@ -85,6 +89,8 @@ A pure profile resolver maps resolution and quality to explicit video/audio bitr
 ### 6.3 Audio compatibility and sync
 
 Inputs are probed after being written to FFmpeg MEMFS. Clips without an audio stream receive a duration-matched stereo silent source before concatenation. Positive audio delay pads the beginning. Negative delay trims the beginning and pads the end back to the selected video duration, preventing `-shortest` from truncating the picture.
+
+Users can independently configure global audio fade-in and fade-out durations in seconds. Fades are applied after concatenation and audio-delay correction, against the final selected export duration: fade-in starts at zero and fade-out ends at the selected output boundary. Each duration is clamped to the output duration; zero disables that fade. Fade-in and fade-out may overlap intentionally on very short selections, while negative and non-finite values are rejected by the pure command builder. Slider edits follow the bounded-history checkpoint policy and older drafts restore zero-duration defaults.
 
 Inputs are loaded, probed, and written sequentially to reduce transient browser memory. Only files intersecting the project export range are written. MP4 uses H.264/AAC with `faststart`; WebM uses VP9/Opus.
 

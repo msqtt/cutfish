@@ -7,6 +7,7 @@ import {
 } from './ffmpeg-utils';
 
 const filters = { brightness: 110, contrast: 95, saturation: 120 };
+const noFade = { fadeIn: 0, fadeOut: 0 };
 const clips = [
   { id: 'a', filename: 'a.mp4', trimStart: 1, trimEnd: 4, hasAudio: true },
   { id: 'b', filename: 'b.webm', trimStart: 10, trimEnd: 14, hasAudio: false },
@@ -49,7 +50,7 @@ describe('export profiles', () => {
 describe('buildFFmpegCommand', () => {
   it('normalizes with selected parameters and synthesizes missing audio', () => {
     const profile = resolveExportProfile(settings);
-    const args = buildFFmpegCommand(clips, filters, 250, 'mp4', profile);
+    const args = buildFFmpegCommand(clips, filters, 250, noFade, 'mp4', profile);
     const graph = args[args.indexOf('-filter_complex') + 1];
     expect(args.slice(0, 5)).toEqual(['-y', '-i', 'a.mp4', '-i', 'b.webm']);
     expect(graph).toContain('scale=1280:720');
@@ -61,15 +62,32 @@ describe('buildFFmpegCommand', () => {
   });
 
   it('advances audio without shortening selected video', () => {
-    const args = buildFFmpegCommand([clips[0]], filters, -1500, 'webm', resolveExportProfile(settings));
+    const args = buildFFmpegCommand([clips[0]], filters, -1500, noFade, 'webm', resolveExportProfile(settings));
     const graph = args[args.indexOf('-filter_complex') + 1];
-    expect(graph).toContain('atrim=start=1.5,asetpts=PTS-STARTPTS,apad,atrim=duration=3[synceda]');
+    expect(graph).toContain('atrim=start=1.5,asetpts=PTS-STARTPTS,apad,atrim=duration=3[timeda]');
     expect(args).toContain('libvpx-vp9');
+  });
+
+  it('applies fade-in at the start and fade-out at the selected output end', () => {
+    const args = buildFFmpegCommand(
+      clips, filters, 0, { fadeIn: 1.25, fadeOut: 2 }, 'mp4', resolveExportProfile(settings),
+    );
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('[timeda]afade=t=in:st=0:d=1.25,afade=t=out:st=5:d=2[synceda]');
+  });
+
+  it('clamps fades to output duration and rejects invalid values', () => {
+    const profile = resolveExportProfile(settings);
+    const args = buildFFmpegCommand([clips[0]], filters, 0, { fadeIn: 10, fadeOut: 10 }, 'mp4', profile);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('afade=t=in:st=0:d=3,afade=t=out:st=0:d=3[synceda]');
+    expect(() => buildFFmpegCommand(clips, filters, 0, { fadeIn: -1, fadeOut: 0 }, 'mp4', profile)).toThrow('fadeIn');
+    expect(() => buildFFmpegCommand(clips, filters, 0, { fadeIn: 0, fadeOut: Number.NaN }, 'mp4', profile)).toThrow('finite');
   });
 
   it('rejects empty and invalid trim input', () => {
     const profile = resolveExportProfile(settings);
-    expect(() => buildFFmpegCommand([], filters, 0, 'mp4', profile)).toThrow('At least one clip');
-    expect(() => buildFFmpegCommand([{ ...clips[0], trimEnd: 1 }], filters, 0, 'mp4', profile)).toThrow('Invalid trim range');
+    expect(() => buildFFmpegCommand([], filters, 0, noFade, 'mp4', profile)).toThrow('At least one clip');
+    expect(() => buildFFmpegCommand([{ ...clips[0], trimEnd: 1 }], filters, 0, noFade, 'mp4', profile)).toThrow('Invalid trim range');
   });
 });

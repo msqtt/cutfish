@@ -15,6 +15,11 @@ export interface ClipMetadata extends TimelineClip {
   hasAudio: boolean;
 }
 
+export interface AudioFadeSettings {
+  fadeIn: number;
+  fadeOut: number;
+}
+
 export type ExportResolution = '480p' | '720p' | '1080p';
 export type ExportFrameRate = 24 | 30 | 60;
 export type ExportQuality = 'compact' | 'balanced' | 'high';
@@ -61,6 +66,10 @@ const AUDIO_BITRATES: Record<ExportQuality, number> = {
 function safeNumber(value: number, label: string) {
   if (!Number.isFinite(value)) throw new Error(`${label} must be finite`);
   return value;
+}
+
+function formatFilterNumber(value: number) {
+  return Number(value.toFixed(6)).toString();
 }
 
 export function resolveExportProfile(settings: ExportSettings): ExportProfile {
@@ -117,6 +126,7 @@ export function buildFFmpegCommand(
   clips: ClipMetadata[],
   filters: FilterState,
   audioDelayMs: number,
+  audioFade: AudioFadeSettings,
   outputFormat: 'mp4' | 'webm',
   profile: ExportProfile,
 ): string[] {
@@ -161,13 +171,28 @@ export function buildFFmpegCommand(
 
   const delay = Math.round(safeNumber(audioDelayMs, 'audioDelayMs'));
   if (delay > 0) {
-    filterComplex += `[concata]adelay=delays=${delay}:all=1[synceda]`;
+    filterComplex += `[concata]adelay=delays=${delay}:all=1[timeda];`;
   } else if (delay < 0) {
     filterComplex += `[concata]atrim=start=${Math.abs(delay) / 1000},asetpts=PTS-STARTPTS,`;
-    filterComplex += `apad,atrim=duration=${outputDuration}[synceda]`;
+    filterComplex += `apad,atrim=duration=${outputDuration}[timeda];`;
   } else {
-    filterComplex += '[concata]anull[synceda]';
+    filterComplex += '[concata]anull[timeda];';
   }
+
+  const requestedFadeIn = safeNumber(audioFade.fadeIn, 'fadeIn');
+  const requestedFadeOut = safeNumber(audioFade.fadeOut, 'fadeOut');
+  if (requestedFadeIn < 0) throw new Error('fadeIn must not be negative');
+  if (requestedFadeOut < 0) throw new Error('fadeOut must not be negative');
+  const fadeIn = Math.min(requestedFadeIn, outputDuration);
+  const fadeOut = Math.min(requestedFadeOut, outputDuration);
+  const fadeFilters: string[] = [];
+  if (fadeIn > 0) fadeFilters.push(`afade=t=in:st=0:d=${formatFilterNumber(fadeIn)}`);
+  if (fadeOut > 0) {
+    fadeFilters.push(`afade=t=out:st=${formatFilterNumber(outputDuration - fadeOut)}:d=${formatFilterNumber(fadeOut)}`);
+  }
+  filterComplex += fadeFilters.length
+    ? `[timeda]${fadeFilters.join(',')}[synceda]`
+    : '[timeda]anull[synceda]';
 
   args.push('-filter_complex', filterComplex, '-map', '[filteredv]', '-map', '[synceda]');
   const videoBitrate = `${profile.videoBitrateKbps}k`;

@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 import ExportPanel from '@/components/ExportPanel';
 import {
   buildFFmpegCommand, resolveExportProfile, selectClipsForExport,
-  type ExportSettings,
+  type AudioFadeSettings, type ExportSettings,
 } from '@/lib/ffmpeg-utils';
 import { useHistory } from '@/lib/history';
 import '@/lib/i18n';
@@ -33,13 +33,15 @@ export interface EditorState {
   clips: Clip[];
   activeClipId: string | null;
   audioDelay: number;
+  audioFade: AudioFadeSettings;
   filters: { brightness: number; contrast: number; saturation: number };
   exportSettings: ExportSettings;
 }
 
-type DraftState = Omit<EditorState, 'clips' | 'exportSettings'> & {
+type DraftState = Omit<EditorState, 'clips' | 'exportSettings' | 'audioFade'> & {
   clips: Array<Omit<Clip, 'url'>>;
   exportSettings?: Partial<ExportSettings>;
+  audioFade?: Partial<AudioFadeSettings>;
 };
 type MobilePanel = 'media' | 'inspector' | null;
 type Toast = { kind: 'success' | 'error'; message: string } | null;
@@ -50,6 +52,7 @@ const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
 };
 const DEFAULT_STATE: EditorState = {
   clips: [], activeClipId: null, audioDelay: 0,
+  audioFade: { fadeIn: 0, fadeOut: 0 },
   filters: { brightness: 100, contrast: 100, saturation: 100 },
   exportSettings: DEFAULT_EXPORT_SETTINGS,
 };
@@ -175,6 +178,7 @@ export default function Editor() {
             ...DEFAULT_STATE,
             ...draft,
             filters: { ...DEFAULT_STATE.filters, ...draft.filters },
+            audioFade: { ...DEFAULT_STATE.audioFade, ...draft.audioFade },
             exportSettings: { ...DEFAULT_EXPORT_SETTINGS, ...draft.exportSettings },
             clips,
             activeClipId,
@@ -390,7 +394,9 @@ export default function Editor() {
       const outputName = `output.${format}`;
       temporaryFiles.push(outputName);
       const exitCode = await engine.exec(
-        buildFFmpegCommand(metadata, state.filters, state.audioDelay, format, profile),
+        buildFFmpegCommand(
+          metadata, state.filters, state.audioDelay, state.audioFade, format, profile,
+        ),
       );
       if (exitCode !== 0) throw new Error(`FFmpeg exited with code ${exitCode}`);
       const data = await engine.readFile(outputName);
@@ -626,8 +632,13 @@ export default function Editor() {
               </div>
             </section>
             <section aria-labelledby="audio-heading">
-              <h2 id="audio-heading" className="mb-3 text-xs font-medium">{t('audio_sync')} <span className="text-[var(--muted)]">· {t('global')}</span></h2>
-              <RangeControl label={t('audio_sync')} value={state.audioDelay} min={-5000} max={5000} step={100} unit="ms" onChange={(value) => replaceState((current) => ({ ...current, audioDelay: value }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+              <h2 id="audio-heading" className="mb-3 text-xs font-medium">{t('audio')} <span className="text-[var(--muted)]">· {t('global')}</span></h2>
+              <div className="space-y-4">
+                <RangeControl label={t('audio_sync')} value={state.audioDelay} min={-5000} max={5000} step={100} unit="ms" onChange={(value) => replaceState((current) => ({ ...current, audioDelay: value }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                <RangeControl label={t('fade_in')} value={state.audioFade.fadeIn} min={0} max={30} step={0.1} unit="s" onChange={(value) => replaceState((current) => ({ ...current, audioFade: { ...current.audioFade, fadeIn: value } }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                <RangeControl label={t('fade_out')} value={state.audioFade.fadeOut} min={0} max={30} step={0.1} unit="s" onChange={(value) => replaceState((current) => ({ ...current, audioFade: { ...current.audioFade, fadeOut: value } }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                <p className="text-[10px] leading-4 text-[var(--muted)]">{t('fade_hint')}</p>
+              </div>
             </section>
             <ExportPanel
               settings={state.exportSettings}
