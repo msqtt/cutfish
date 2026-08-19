@@ -130,11 +130,14 @@ export default function Editor() {
   const [progress, setProgress] = useState(0);
   const [draftReady, setDraftReady] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [isDragging, setIsDragging] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const exportDialogRef = useRef<HTMLDivElement>(null);
+  const exportTriggerRef = useRef<HTMLButtonElement>(null);
   const objectUrlsRef = useRef(new Set<string>());
   const continuousEditRef = useRef<EditorState | null>(null);
   const ffmpegRef = useRef<FFmpeg | null>(null);
@@ -435,12 +438,54 @@ export default function Editor() {
     setProgress(0);
   }, []);
 
+  const closeExportModal = useCallback(() => {
+    setExportModalOpen(false);
+    window.requestAnimationFrame(() => exportTriggerRef.current?.focus());
+  }, []);
+
+  const trapExportFocus = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Tab') return;
+    const focusable = exportDialogRef.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), details > summary, [contenteditable="true"], [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusable?.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (document.activeElement === exportDialogRef.current) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!exportModalOpen) return;
+    const frame = window.requestAnimationFrame(() => exportDialogRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [exportModalOpen]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const editing = target?.matches('input, textarea, select, button, [contenteditable="true"]');
-      if (event.code === 'Escape') setMobilePanel(null);
-      if (editing) return;
+      if (event.code === 'Escape') {
+        if (exportModalOpen) {
+          event.preventDefault();
+          closeExportModal();
+          return;
+        }
+        if (mobilePanel) {
+          event.preventDefault();
+          setMobilePanel(null);
+          return;
+        }
+      }
+      if (exportModalOpen || editing) return;
       if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
       if ((event.ctrlKey || event.metaKey) && event.code === 'KeyZ') {
         event.preventDefault();
@@ -455,7 +500,7 @@ export default function Editor() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeClip, handleExport, redo, removeClip, seek, togglePlay, undo]);
+  }, [activeClip, closeExportModal, exportModalOpen, handleExport, mobilePanel, redo, removeClip, seek, togglePlay, undo]);
 
   const updateFilter = (key: keyof EditorState['filters'], value: number) => {
     replaceState((current) => ({ ...current, filters: { ...current.filters, [key]: value } }));
@@ -640,19 +685,22 @@ export default function Editor() {
                 <p className="text-[10px] leading-4 text-[var(--muted)]">{t('fade_hint')}</p>
               </div>
             </section>
-            <ExportPanel
-              settings={state.exportSettings}
-              projectDuration={projectDuration}
-              disabled={!state.clips.length || processing}
-              onChange={(settings, transient) => {
-                const apply = (current: EditorState) => ({ ...current, exportSettings: settings });
-                if (transient) replaceState(apply);
-                else updateState(apply);
-              }}
-              onEditStart={beginContinuousEdit}
-              onEditEnd={finishContinuousEdit}
-              onExport={(format) => void handleExport(format)}
-            />
+            <section aria-labelledby="export-launch-heading" className="rounded-lg border border-[var(--border)] bg-[var(--raised)] p-3">
+              <h2 id="export-launch-heading" className="text-xs font-medium">{t('export')}</h2>
+              <p className="mt-1 text-[10px] leading-4 text-[var(--muted)]">
+                {state.exportSettings.resolution} · {state.exportSettings.frameRate} fps · {t(`quality_${state.exportSettings.quality}`)}
+              </p>
+              <button
+                ref={exportTriggerRef}
+                type="button"
+                onClick={() => setExportModalOpen(true)}
+                disabled={processing}
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-md bg-indigo-600 px-3 py-2.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                {t('open_export_settings')}
+              </button>
+            </section>
           </div>
         </aside>
       </div>
@@ -677,6 +725,57 @@ export default function Editor() {
           </div>
         ) : <div className="flex flex-1 items-center justify-center text-xs text-[var(--muted)]">{t('no_media')}</div>}
       </footer>
+
+      {exportModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 backdrop-blur-sm sm:p-6"
+          onMouseDown={(event) => { if (event.currentTarget === event.target) closeExportModal(); }}
+        >
+          <div
+            ref={exportDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="export-modal-heading"
+            aria-describedby="export-modal-description"
+            tabIndex={-1}
+            onKeyDown={trapExportFocus}
+            className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl sm:max-h-[calc(100dvh-3rem)]"
+          >
+            <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
+              <div>
+                <h2 id="export-modal-heading" className="text-sm font-semibold">{t('export_settings')}</h2>
+                <p id="export-modal-description" className="mt-0.5 text-[10px] text-[var(--muted)]">{t('export_settings_hint')}</p>
+              </div>
+              <button
+                type="button"
+                onClick={closeExportModal}
+                className={iconButton}
+                aria-label={t('close_export_settings')}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+              <ExportPanel
+                settings={state.exportSettings}
+                projectDuration={projectDuration}
+                disabled={!state.clips.length || processing}
+                onChange={(settings, transient) => {
+                  const apply = (current: EditorState) => ({ ...current, exportSettings: settings });
+                  if (transient) replaceState(apply);
+                  else updateState(apply);
+                }}
+                onEditStart={beginContinuousEdit}
+                onEditEnd={finishContinuousEdit}
+                onExport={(format) => {
+                  setExportModalOpen(false);
+                  void handleExport(format);
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && <div className={`fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-lg px-4 py-2.5 text-sm text-white shadow-xl ${toast.kind === 'success' ? 'bg-emerald-600' : 'bg-red-600'}`} role="status" aria-live="polite">{toast.message}</div>}
     </div>

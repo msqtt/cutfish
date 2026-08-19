@@ -24,7 +24,7 @@ Cutfish is a privacy-first browser video editor. Source files, drafts, and rende
 app/layout.tsx             metadata, theme provider, global shell
 app/page.tsx               client-only editor boundary and loading state
 components/Editor.tsx      workflow orchestration and accessible UI
-components/ExportPanel.tsx project range, profile controls, and size estimate
+components/ExportPanel.tsx modal content for project range, profile controls, and size estimate
 lib/history.ts             pure bounded history transitions + React adapter
 lib/ffmpeg-utils.ts        pure validated FFmpeg argument generation
 lib/i18n.ts                English and Chinese resources
@@ -105,6 +105,8 @@ Inputs are loaded, probed, and written sequentially to reduce transient browser 
 ## 8. Accessibility and responsive behavior
 
 All icon buttons have accessible names, controls are keyboard reachable, focus is visible, reduced-motion is honored, and status changes use live regions. On screens below the desktop breakpoint, media and inspector panels become dismissible drawers while preview and timeline remain usable.
+
+Export configuration is opened from a compact inspector action into a dedicated responsive modal. The modal has an accessible name and `aria-modal` semantics, receives focus on open, traps `Tab` navigation, closes via its named button, backdrop, or `Escape`, and restores focus to the inspector trigger. Its body scrolls independently on small screens; starting an export closes it before the rendering status dialog appears.
 
 ## 9. Verification
 

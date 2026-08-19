@@ -8,7 +8,7 @@ Cutfish is a private, browser-based video editor powered by FFmpeg WebAssembly. 
 
 - **Private by design** — editing and rendering happen locally in the browser.
 - **Multi-clip workflow** — import multiple files, reorder or remove them, preview continuously, and export one video.
-- **Flexible export** — select any project timeline range, then choose 480p/720p/1080p, 24/30/60 fps, and compact/balanced/high quality with an estimated output size.
+- **Flexible export** — use a dedicated responsive dialog to select any project timeline range, then choose 480p/720p/1080p, 24/30/60 fps, and compact/balanced/high quality with an estimated output size.
 - **Audio-compatible merging** — mix videos with or without audio; silent tracks are synthesized locally when needed.
 - **Precise editing** — trim ranges, real-time color preview, configurable audio sync and global fade-in/fade-out, and ±5 second seeking.
 - **Local drafts** — source `File` objects and editor state are restored from IndexedDB.

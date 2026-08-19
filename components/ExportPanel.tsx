@@ -58,9 +58,8 @@ export default function ExportPanel({
   };
 
   return (
-    <section aria-labelledby="export-heading" className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <h2 id="export-heading" className="text-xs font-medium">{t('export')}</h2>
+    <section aria-label={t('export_settings')} className="space-y-4">
+      <div className="flex justify-end">
         <button
           type="button"
           onClick={() => onChange({ ...settings, rangeStart: 0, rangeEnd: null })}
@@ -140,8 +139,8 @@ export default function ExportPanel({
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <button onClick={() => onExport('mp4')} disabled={disabled || rangeDuration <= 0} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_mp4')}</button>
-        <button onClick={() => onExport('webm')} disabled={disabled || rangeDuration <= 0} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_webm')}</button>
+        <button type="button" onClick={() => onExport('mp4')} disabled={disabled || rangeDuration <= 0} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_mp4')}</button>
+        <button type="button" onClick={() => onExport('webm')} disabled={disabled || rangeDuration <= 0} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_webm')}</button>
       </div>
     </section>
   );
