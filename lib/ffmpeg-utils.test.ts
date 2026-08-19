@@ -4,6 +4,15 @@ import {
   estimateOutputSizeMB,
   resolveExportProfile,
   selectClipsForExport,
+  selectClipsForExportSpeedAware,
+  buildFFmpegCommandExtended,
+  computeVolumeFilter,
+  buildRotationFilters,
+  buildSpeedFilters,
+  type ExtendedClipMetadata,
+  type TransitionConfig,
+  type TextOverlay,
+  type BgMusicExport,
 } from './ffmpeg-utils';
 
 const filters = { brightness: 110, contrast: 95, saturation: 120 };
@@ -89,5 +98,266 @@ describe('buildFFmpegCommand', () => {
     const profile = resolveExportProfile(settings);
     expect(() => buildFFmpegCommand([], filters, 0, noFade, 'mp4', profile)).toThrow('At least one clip');
     expect(() => buildFFmpegCommand([{ ...clips[0], trimEnd: 1 }], filters, 0, noFade, 'mp4', profile)).toThrow('Invalid trim range');
+  });
+});
+
+describe('computeVolumeFilter', () => {
+  it('returns correct volume expression for normal clip', () => {
+    expect(computeVolumeFilter(100, 100, false)).toBe('volume=1');
+  });
+
+  it('applies clip volume percentage', () => {
+    expect(computeVolumeFilter(150, 100, false)).toBe('volume=1.5');
+  });
+
+  it('applies master volume', () => {
+    expect(computeVolumeFilter(100, 50, false)).toBe('volume=0.5');
+  });
+
+  it('combines clip and master volume', () => {
+    expect(computeVolumeFilter(150, 80, false)).toBe('volume=1.2');
+  });
+
+  it('returns volume=0 when muted', () => {
+    expect(computeVolumeFilter(150, 100, true)).toBe('volume=0');
+  });
+});
+
+describe('buildRotationFilters', () => {
+  it('returns empty for no rotation or flips', () => {
+    expect(buildRotationFilters(0, false, false)).toBe('');
+  });
+
+  it('applies transpose for 90 degrees', () => {
+    const result = buildRotationFilters(90, false, false);
+    expect(result).toContain('transpose=1');
+  });
+
+  it('applies transpose for 270 degrees', () => {
+    const result = buildRotationFilters(270, false, false);
+    expect(result).toContain('transpose=2');
+  });
+
+  it('applies double transpose for 180 degrees', () => {
+    const result = buildRotationFilters(180, false, false);
+    expect(result).toContain('transpose=1,transpose=1');
+  });
+
+  it('applies hflip', () => {
+    const result = buildRotationFilters(0, true, false);
+    expect(result).toBe('hflip');
+  });
+
+  it('applies vflip', () => {
+    const result = buildRotationFilters(0, false, true);
+    expect(result).toBe('vflip');
+  });
+
+  it('combines rotation and flips', () => {
+    const result = buildRotationFilters(90, true, false);
+    expect(result).toContain('transpose=1');
+    expect(result).toContain('hflip');
+  });
+});
+
+describe('buildSpeedFilters', () => {
+  it('returns empty for speed 1.0', () => {
+    expect(buildSpeedFilters(1.0)).toEqual({ video: '', audio: '' });
+  });
+
+  it('applies setpts for video speed', () => {
+    const result = buildSpeedFilters(2.0);
+    expect(result.video).toBe('setpts=PTS/2');
+  });
+
+  it('applies atempo for audio speed', () => {
+    const result = buildSpeedFilters(2.0);
+    expect(result.audio).toBe('atempo=2');
+  });
+
+  it('chains atempo for speeds > 2.0', () => {
+    const result = buildSpeedFilters(4.0);
+    expect(result.video).toBe('setpts=PTS/4');
+    expect(result.audio).toBe('atempo=2,atempo=2');
+  });
+
+  it('handles slow motion', () => {
+    const result = buildSpeedFilters(0.5);
+    expect(result.video).toBe('setpts=PTS/0.5');
+    expect(result.audio).toBe('atempo=0.5');
+  });
+
+  it('chains atempo for speeds < 0.5', () => {
+    const result = buildSpeedFilters(0.25);
+    expect(result.video).toBe('setpts=PTS/0.25');
+    expect(result.audio).toBe('atempo=0.5,atempo=0.5');
+  });
+});
+
+describe('buildFFmpegCommandExtended', () => {
+  const extClips: ExtendedClipMetadata[] = [
+    { id: 'a', filename: 'a.mp4', trimStart: 1, trimEnd: 4, hasAudio: true, volume: 100, muted: false, rotation: 0, flipH: false, flipV: false, speed: 1.0 },
+    { id: 'b', filename: 'b.webm', trimStart: 10, trimEnd: 14, hasAudio: false, volume: 150, muted: false, rotation: 90, flipH: false, flipV: false, speed: 1.0 },
+  ];
+
+  it('applies per-clip volume in filter graph', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('volume=1'); // clip a: 100*100/10000 = 1
+    expect(graph).toContain('volume=1.5'); // clip b: 150*100/10000 = 1.5
+  });
+
+  it('applies rotation filter for rotated clip', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('transpose=1'); // 90 degrees
+  });
+
+  it('mutes clip audio with volume=0', () => {
+    const mutedClips: ExtendedClipMetadata[] = [
+      { ...extClips[0], muted: true },
+    ];
+    const args = buildFFmpegCommandExtended(mutedClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('volume=0');
+  });
+
+  it('applies speed filters when speed != 1.0', () => {
+    const speedClips: ExtendedClipMetadata[] = [
+      { ...extClips[0], speed: 2.0 },
+    ];
+    const args = buildFFmpegCommandExtended(speedClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('setpts=PTS/2');
+    expect(graph).toContain('atempo=2');
+  });
+
+  it('applies master volume scaling', () => {
+    const args = buildFFmpegCommandExtended([extClips[0]], filters, 0, noFade, 'mp4', resolveExportProfile(settings), 50, '16:9', 'contain', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('volume=0.5'); // 100*50/10000 = 0.5
+  });
+
+  it('includes transition xfade when transitions provided', () => {
+    const transitions: TransitionConfig[] = [
+      { id: 't1', afterClipId: 'a', type: 'fade', duration: 0.5 },
+    ];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', transitions, [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('xfade=transition=fade');
+  });
+
+  it('includes drawtext filter when text overlays provided', () => {
+    const overlays: TextOverlay[] = [
+      { id: 'o1', text: 'Hello', fontFamily: 'sans', fontSize: 48, color: '#ffffff', position: { x: 50, y: 50 }, startTime: 1, endTime: 3 },
+    ];
+    const args = buildFFmpegCommandExtended([extClips[0]], filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], overlays, null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('drawtext=');
+    expect(graph).toContain("enable='between(t,1,3)'");
+  });
+
+  it('includes amix when background music provided', () => {
+    const bgMusic: BgMusicExport = { filename: 'bg.mp3', volume: 80, loop: false, fadeIn: 1, fadeOut: 2 };
+    const args = buildFFmpegCommandExtended([extClips[0]], filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], bgMusic);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('amix=inputs=2');
+    expect(args).toContain('bg.mp3');
+  });
+
+  it('adjusts canvas dimensions for 9:16 aspect', () => {
+    const args = buildFFmpegCommandExtended([extClips[0]], filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '9:16', 'contain', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('scale=720:1280');
+  });
+
+  it('cover mode uses crop instead of pad after scale', () => {
+    const args = buildFFmpegCommandExtended([extClips[0]], filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'cover', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('force_original_aspect_ratio=increase');
+    expect(graph).toContain('crop=1280:720');
+    expect(graph).not.toContain('pad=1280:720');
+  });
+
+  it('contain mode uses pad after scale', () => {
+    const args = buildFFmpegCommandExtended([extClips[0]], filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('force_original_aspect_ratio=decrease');
+    expect(graph).toContain('pad=1280:720');
+  });
+
+  it('stretch mode does not use force_original_aspect_ratio', () => {
+    const args = buildFFmpegCommandExtended([extClips[0]], filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'stretch', [], [], null);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).not.toContain('force_original_aspect_ratio');
+    expect(graph).not.toContain('pad=');
+    expect(graph).not.toContain('crop=');
+  });
+
+  it('preserves backward compatibility - old buildFFmpegCommand still works', () => {
+    const profile = resolveExportProfile(settings);
+    const args = buildFFmpegCommand(clips, filters, 0, noFade, 'mp4', profile);
+    expect(args).toContain('-y');
+    expect(args).toContain('output.mp4');
+  });
+});
+
+describe('selectClipsForExportSpeedAware (H1)', () => {
+  const speedClips = [
+    { id: 'a', trimStart: 0, trimEnd: 4, speed: 2.0 },   // plays in 2s
+    { id: 'b', trimStart: 0, trimEnd: 6, speed: 0.5 },   // plays in 12s
+    { id: 'c', trimStart: 0, trimEnd: 3, speed: 1.0 },   // plays in 3s
+  ];
+  // Total playback duration: 2 + 12 + 3 = 17s
+
+  it('selects full range correctly', () => {
+    const result = selectClipsForExportSpeedAware(speedClips, { start: 0, end: 17 });
+    expect(result).toHaveLength(3);
+    expect(result[0].trimStart).toBeCloseTo(0);
+    expect(result[0].trimEnd).toBeCloseTo(4);
+    expect(result[1].trimStart).toBeCloseTo(0);
+    expect(result[1].trimEnd).toBeCloseTo(6);
+    expect(result[2].trimStart).toBeCloseTo(0);
+    expect(result[2].trimEnd).toBeCloseTo(3);
+  });
+
+  it('selects partial range within first clip', () => {
+    // First clip plays at 2x: 1s playback = 2s source
+    const result = selectClipsForExportSpeedAware(speedClips, { start: 0.5, end: 1.5 });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('a');
+    expect(result[0].trimStart).toBeCloseTo(1); // 0.5s * 2.0 speed = 1s source
+    expect(result[0].trimEnd).toBeCloseTo(3);   // 1.5s * 2.0 speed = 3s source
+  });
+
+  it('selects range crossing clip boundary (speed-adjusted)', () => {
+    // Clip A ends at playback time 2s, clip B starts at playback time 2s
+    const result = selectClipsForExportSpeedAware(speedClips, { start: 1, end: 4 });
+    expect(result).toHaveLength(2);
+    // In clip A: 1s playback offset * 2.0 speed = 2s source offset from start
+    expect(result[0].id).toBe('a');
+    expect(result[0].trimStart).toBeCloseTo(2);
+    expect(result[0].trimEnd).toBeCloseTo(4);
+    // In clip B: 2s playback into B at 0.5x speed = 1s source offset
+    expect(result[1].id).toBe('b');
+    expect(result[1].trimStart).toBeCloseTo(0);
+    expect(result[1].trimEnd).toBeCloseTo(1);
+  });
+
+  it('throws on out-of-range', () => {
+    expect(() => selectClipsForExportSpeedAware(speedClips, { start: 0, end: 20 })).toThrow('outside');
+  });
+
+  it('works with clips missing speed field (defaults to 1.0)', () => {
+    const noSpeedClips = [
+      { id: 'x', trimStart: 0, trimEnd: 5 },
+      { id: 'y', trimStart: 0, trimEnd: 3 },
+    ];
+    const result = selectClipsForExportSpeedAware(noSpeedClips, { start: 2, end: 6 });
+    expect(result).toHaveLength(2);
+    expect(result[0].trimStart).toBeCloseTo(2);
+    expect(result[0].trimEnd).toBeCloseTo(5);
+    expect(result[1].trimStart).toBeCloseTo(0);
+    expect(result[1].trimEnd).toBeCloseTo(1);
   });
 });

@@ -1,3 +1,7 @@
+import { buildAtempoChain, computeCanvasDimensions, type CanvasAspect } from './editor-utils';
+import { buildXfadeChain, buildAcrossfadeChain, computeTransitionAdjustedDuration, getXfadeFinalLabel, type TransitionClip } from './transition-utils';
+import { buildDrawtextFilters, type FontMap } from './text-overlay-utils';
+
 export interface FilterState {
   brightness: number;
   contrast: number;
@@ -13,6 +17,41 @@ export interface TimelineClip {
 export interface ClipMetadata extends TimelineClip {
   filename: string;
   hasAudio: boolean;
+}
+
+export interface ExtendedClipMetadata extends ClipMetadata {
+  volume: number;       // 0–200
+  muted: boolean;
+  rotation: 0 | 90 | 180 | 270;
+  flipH: boolean;
+  flipV: boolean;
+  speed: number;        // 0.25–4.0
+}
+
+export interface TransitionConfig {
+  id: string;
+  afterClipId: string;
+  type: 'fade' | 'dissolve' | 'wipeleft' | 'wiperight' | 'wipeup' | 'wipedown' | 'slideright' | 'slideleft';
+  duration: number;
+}
+
+export interface TextOverlay {
+  id: string;
+  text: string;
+  fontFamily: 'sans' | 'serif' | 'mono';
+  fontSize: number;
+  color: string;
+  position: { x: number; y: number };
+  startTime: number;
+  endTime: number;
+}
+
+export interface BgMusicExport {
+  filename: string;
+  volume: number;   // 0–200
+  loop: boolean;
+  fadeIn: number;
+  fadeOut: number;
 }
 
 export interface AudioFadeSettings {
@@ -121,6 +160,50 @@ export function selectClipsForExport<T extends TimelineClip>(clips: T[], range: 
   return selected;
 }
 
+export interface SpeedAwareTimelineClip extends TimelineClip {
+  speed?: number;
+}
+
+/** Speed-aware export selection: range is in playback time, accounting for per-clip speed. */
+export function selectClipsForExportSpeedAware<T extends SpeedAwareTimelineClip>(clips: T[], range: ExportRange): T[] {
+  const start = safeNumber(range.start, 'range.start');
+  const end = safeNumber(range.end, 'range.end');
+  if (start < 0 || end <= start) throw new Error('Invalid export range');
+
+  const projectDuration = clips.reduce((total, clip) => {
+    const duration = safeNumber(clip.trimEnd, 'trimEnd') - safeNumber(clip.trimStart, 'trimStart');
+    if (clip.trimStart < 0 || duration <= 0) throw new Error(`Invalid trim range for ${clip.id}`);
+    const speed = (clip.speed != null && Number.isFinite(clip.speed) && clip.speed > 0) ? clip.speed : 1.0;
+    return total + duration / speed;
+  }, 0);
+  if (start >= projectDuration || end > projectDuration + 1e-6) {
+    throw new Error('Export range is outside the project');
+  }
+
+  const selected: T[] = [];
+  let cursor = 0;
+  for (const clip of clips) {
+    const clipSourceDuration = clip.trimEnd - clip.trimStart;
+    const speed = (clip.speed != null && Number.isFinite(clip.speed) && clip.speed > 0) ? clip.speed : 1.0;
+    const clipPlaybackDuration = clipSourceDuration / speed;
+    const intersectionStart = Math.max(start, cursor);
+    const intersectionEnd = Math.min(end, cursor + clipPlaybackDuration);
+    if (intersectionEnd > intersectionStart) {
+      // Convert playback offsets back to source offsets
+      const sourceStart = (intersectionStart - cursor) * speed;
+      const sourceEnd = (intersectionEnd - cursor) * speed;
+      selected.push({
+        ...clip,
+        trimStart: clip.trimStart + sourceStart,
+        trimEnd: clip.trimStart + sourceEnd,
+      });
+    }
+    cursor += clipPlaybackDuration;
+  }
+  if (!selected.length) throw new Error('Export range is outside the project');
+  return selected;
+}
+
 /** Build deterministic FFmpeg arguments for trimmed, normalized clip concatenation. */
 export function buildFFmpegCommand(
   clips: ClipMetadata[],
@@ -195,6 +278,264 @@ export function buildFFmpegCommand(
     : '[timeda]anull[synceda]';
 
   args.push('-filter_complex', filterComplex, '-map', '[filteredv]', '-map', '[synceda]');
+  const videoBitrate = `${profile.videoBitrateKbps}k`;
+  const audioBitrate = `${profile.audioBitrateKbps}k`;
+
+  if (outputFormat === 'mp4') {
+    args.push(
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-b:v', videoBitrate, '-maxrate', `${Math.round(profile.videoBitrateKbps * 1.25)}k`,
+      '-bufsize', `${profile.videoBitrateKbps * 2}k`,
+      '-c:a', 'aac', '-b:a', audioBitrate, '-movflags', '+faststart',
+    );
+  } else {
+    args.push(
+      '-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '8', '-b:v', videoBitrate,
+      '-c:a', 'libopus', '-b:a', audioBitrate,
+    );
+  }
+
+  args.push('-shortest', `output.${outputFormat}`);
+  return args;
+}
+
+/** Compute the volume filter expression for a clip. */
+export function computeVolumeFilter(clipVolume: number, masterVolume: number, muted: boolean): string {
+  if (muted) return 'volume=0';
+  const effective = (clipVolume * masterVolume) / 10000;
+  return `volume=${Number(effective.toFixed(6))}`;
+}
+
+/** Build FFmpeg rotation/flip filter string for a clip. */
+export function buildRotationFilters(rotation: 0 | 90 | 180 | 270, flipH: boolean, flipV: boolean): string {
+  const parts: string[] = [];
+  if (rotation === 90) parts.push('transpose=1');
+  else if (rotation === 180) parts.push('transpose=1,transpose=1');
+  else if (rotation === 270) parts.push('transpose=2');
+
+  if (flipH) parts.push('hflip');
+  if (flipV) parts.push('vflip');
+
+  return parts.join(',');
+}
+
+/** Build speed filter expressions for video and audio. */
+export function buildSpeedFilters(speed: number): { video: string; audio: string } {
+  if (speed === 1.0) return { video: '', audio: '' };
+  const video = `setpts=PTS/${speed}`;
+  const audio = buildAtempoChain(speed);
+  return { video, audio };
+}
+
+const DEFAULT_FONT_MAP: FontMap = {
+  sans: '/fonts/DejaVuSans.ttf',
+  serif: '/fonts/DejaVuSerif.ttf',
+  mono: '/fonts/DejaVuSansMono.ttf',
+};
+
+/**
+ * Build extended FFmpeg command with all new features:
+ * volume, mute, master volume, rotation, flips, speed, transitions, text overlays, bg music.
+ *
+ * Preserves backward compatibility: all original buildFFmpegCommand parameters remain the same,
+ * with new parameters added after.
+ */
+export function buildFFmpegCommandExtended(
+  clips: ExtendedClipMetadata[],
+  filters: FilterState,
+  audioDelayMs: number,
+  audioFade: AudioFadeSettings,
+  outputFormat: 'mp4' | 'webm',
+  profile: ExportProfile,
+  masterVolume: number,
+  canvasAspect: CanvasAspect,
+  canvasFit: 'contain' | 'cover' | 'stretch',
+  transitions: TransitionConfig[],
+  textOverlays: TextOverlay[],
+  bgMusic: BgMusicExport | null,
+  fontMap: FontMap = DEFAULT_FONT_MAP,
+): string[] {
+  if (clips.length === 0) throw new Error('At least one clip is required');
+
+  // Compute canvas dimensions based on aspect
+  const canvas = computeCanvasDimensions(canvasAspect, profile.height === 1080 ? '1080p' : profile.height === 720 ? '720p' : '480p');
+
+  const args: string[] = ['-y'];
+  clips.forEach((clip) => {
+    if (!clip.filename) throw new Error('Clip filename is required');
+    if (safeNumber(clip.trimStart, 'trimStart') < 0 || clip.trimEnd <= clip.trimStart) {
+      throw new Error(`Invalid trim range for ${clip.filename}`);
+    }
+    args.push('-i', clip.filename);
+  });
+
+  // Add bg music input
+  if (bgMusic) {
+    args.push('-i', bgMusic.filename);
+  }
+
+  let filterComplex = '';
+  let outputDuration = 0;
+
+  // Per-clip normalization with volume, rotation, flip, speed
+  clips.forEach((clip, index) => {
+    const start = safeNumber(clip.trimStart, 'trimStart');
+    const end = safeNumber(clip.trimEnd, 'trimEnd');
+    const rawDuration = end - start;
+    const speed = clip.speed || 1.0;
+    const effectiveDuration = rawDuration / speed;
+    outputDuration += effectiveDuration;
+
+    // Video pipeline
+    let videoChain = `[${index}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS`;
+
+    // Speed
+    const speedFilters = buildSpeedFilters(speed);
+    if (speedFilters.video) {
+      videoChain += `,${speedFilters.video}`;
+    }
+
+    // Rotation/flips
+    const rotationFilter = buildRotationFilters(clip.rotation || 0, clip.flipH || false, clip.flipV || false);
+    if (rotationFilter) {
+      videoChain += `,${rotationFilter}`;
+    }
+
+    // Scale and fit based on fit mode
+    if (canvasFit === 'cover') {
+      // Cover: scale up to fill, then crop to exact canvas
+      videoChain += `,scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=increase`;
+      videoChain += `,crop=${canvas.width}:${canvas.height}`;
+    } else if (canvasFit === 'stretch') {
+      // Stretch: force exact dimensions (no aspect preservation)
+      videoChain += `,scale=${canvas.width}:${canvas.height}`;
+    } else {
+      // Contain: scale down preserving aspect, then pad to fill canvas
+      videoChain += `,scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=decrease`;
+      videoChain += `,pad=${canvas.width}:${canvas.height}:(ow-iw)/2:(oh-ih)/2`;
+    }
+    videoChain += `,fps=${profile.frameRate},setsar=1[v${index}]`;
+    filterComplex += `${videoChain};`;
+
+    // Audio pipeline
+    const volumeFilter = computeVolumeFilter(clip.volume ?? 100, masterVolume, clip.muted ?? false);
+    if (clip.hasAudio) {
+      let audioChain = `[${index}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS`;
+      if (speedFilters.audio) {
+        audioChain += `,${speedFilters.audio}`;
+      }
+      audioChain += `,${volumeFilter}`;
+      audioChain += `,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${index}]`;
+      filterComplex += `${audioChain};`;
+    } else {
+      filterComplex += `anullsrc=r=48000:cl=stereo,atrim=duration=${effectiveDuration},asetpts=PTS-STARTPTS,${volumeFilter}[a${index}];`;
+    }
+  });
+
+  // Transition or concat
+  const transitionClips: TransitionClip[] = clips.map((clip) => ({
+    id: clip.id,
+    trimmedDuration: (clip.trimEnd - clip.trimStart) / (clip.speed || 1.0),
+  }));
+
+  const validTransitions = transitions.filter((t) => {
+    const idx = clips.findIndex((c) => c.id === t.afterClipId);
+    return idx >= 0 && idx < clips.length - 1;
+  });
+
+  const hasTransitions = validTransitions.length > 0;
+  let videoOut: string;
+  let audioOut: string;
+
+  if (hasTransitions && clips.length > 1) {
+    const xfadeChain = buildXfadeChain(transitionClips, validTransitions, profile.frameRate);
+    const acrossfadeChain = buildAcrossfadeChain(transitionClips, validTransitions);
+    filterComplex += `${xfadeChain};`;
+    filterComplex += `${acrossfadeChain};`;
+    videoOut = getXfadeFinalLabel(transitionClips, validTransitions, 'xf');
+    audioOut = getXfadeFinalLabel(transitionClips, validTransitions, 'af');
+    outputDuration = computeTransitionAdjustedDuration(transitionClips, validTransitions);
+  } else {
+    // Simple concat
+    const normalizedStreams = clips.map((_, i) => `[v${i}][a${i}]`).join('');
+    filterComplex += `${normalizedStreams}concat=n=${clips.length}:v=1:a=1[concatv][concata];`;
+    videoOut = '[concatv]';
+    audioOut = '[concata]';
+  }
+
+  // Visual filters (brightness/contrast/saturation)
+  const brightness = (safeNumber(filters.brightness, 'brightness') - 100) / 100;
+  const contrast = safeNumber(filters.contrast, 'contrast') / 100;
+  const saturation = safeNumber(filters.saturation, 'saturation') / 100;
+  filterComplex += `${videoOut}eq=brightness=${brightness}:contrast=${contrast}:saturation=${saturation}[eqv];`;
+
+  // Text overlays via drawtext
+  let finalVideoLabel = '[eqv]';
+  if (textOverlays.length > 0) {
+    const drawtextChain = buildDrawtextFilters(textOverlays, fontMap);
+    filterComplex += `[eqv]${drawtextChain}[filteredv];`;
+    finalVideoLabel = '[filteredv]';
+  } else {
+    filterComplex += '[eqv]null[filteredv];';
+    finalVideoLabel = '[filteredv]';
+  }
+
+  // Audio delay
+  const delay = Math.round(safeNumber(audioDelayMs, 'audioDelayMs'));
+  if (delay > 0) {
+    filterComplex += `${audioOut}adelay=delays=${delay}:all=1[timeda];`;
+  } else if (delay < 0) {
+    filterComplex += `${audioOut}atrim=start=${Math.abs(delay) / 1000},asetpts=PTS-STARTPTS,`;
+    filterComplex += `apad,atrim=duration=${outputDuration}[timeda];`;
+  } else {
+    filterComplex += `${audioOut}anull[timeda];`;
+  }
+
+  // Audio fades
+  const requestedFadeIn = safeNumber(audioFade.fadeIn, 'fadeIn');
+  const requestedFadeOut = safeNumber(audioFade.fadeOut, 'fadeOut');
+  if (requestedFadeIn < 0) throw new Error('fadeIn must not be negative');
+  if (requestedFadeOut < 0) throw new Error('fadeOut must not be negative');
+  const fadeIn = Math.min(requestedFadeIn, outputDuration);
+  const fadeOut = Math.min(requestedFadeOut, outputDuration);
+  const fadeFilters: string[] = [];
+  if (fadeIn > 0) fadeFilters.push(`afade=t=in:st=0:d=${formatFilterNumber(fadeIn)}`);
+  if (fadeOut > 0) {
+    fadeFilters.push(`afade=t=out:st=${formatFilterNumber(outputDuration - fadeOut)}:d=${formatFilterNumber(fadeOut)}`);
+  }
+  filterComplex += fadeFilters.length
+    ? `[timeda]${fadeFilters.join(',')}[synceda];`
+    : '[timeda]anull[synceda];';
+
+  // Background music mixing
+  let finalAudioLabel = '[synceda]';
+  if (bgMusic) {
+    const bgInputIdx = clips.length; // bg music is the last input
+    const bgVolNorm = (bgMusic.volume ?? 100) / 100;
+    let bgAudioChain = `[${bgInputIdx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo`;
+
+    if (bgMusic.loop) {
+      bgAudioChain += `,aloop=loop=-1:size=2e+09`;
+    }
+    bgAudioChain += `,atrim=duration=${outputDuration}`;
+
+    if (bgMusic.fadeIn > 0) {
+      bgAudioChain += `,afade=t=in:st=0:d=${formatFilterNumber(bgMusic.fadeIn)}`;
+    }
+    if (bgMusic.fadeOut > 0) {
+      bgAudioChain += `,afade=t=out:st=${formatFilterNumber(outputDuration - bgMusic.fadeOut)}:d=${formatFilterNumber(bgMusic.fadeOut)}`;
+    }
+    bgAudioChain += `,volume=${bgVolNorm}[bgaudio]`;
+    filterComplex += `${bgAudioChain};`;
+    filterComplex += `[synceda][bgaudio]amix=inputs=2:duration=first[finala]`;
+    finalAudioLabel = '[finala]';
+  } else {
+    // Remove trailing semicolon from synceda and use it directly
+    filterComplex = filterComplex.replace(/;\s*$/, '');
+    finalAudioLabel = '[synceda]';
+  }
+
+  args.push('-filter_complex', filterComplex, '-map', finalVideoLabel, '-map', finalAudioLabel);
   const videoBitrate = `${profile.videoBitrateKbps}k`;
   const audioBitrate = `${profile.audioBitrateKbps}k`;
 
