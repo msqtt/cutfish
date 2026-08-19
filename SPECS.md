@@ -7,8 +7,10 @@ Cutfish is a privacy-first browser video editor. Source files, drafts, and rende
 ## 2. Implemented capabilities
 
 - Multi-file import by picker or drag and drop
-- Media library with selection, ordering, deletion, and undo/redo
-- Per-clip trim ranges and playback bounds
+- Media library with selection, button/drag ordering, deletion, duplication, splitting, and undo/redo
+- Per-clip trim ranges with 0.01-second numeric precision and playback bounds
+- Trimmed-duration timeline with a project playhead and click-to-seek mapping
+- Guarded sequential import with duplicate detection and per-file progress
 - Global brightness, contrast, saturation, audio delay, and configurable fade-in/fade-out
 - Multi-clip normalization and concatenation through FFmpeg.wasm
 - MP4 and WebM download with project-range selection, quality profiles, size estimates, progress, and cancellation
@@ -25,6 +27,8 @@ app/layout.tsx             metadata, theme provider, global shell
 app/page.tsx               client-only editor boundary and loading state
 components/Editor.tsx      workflow orchestration and accessible UI
 components/ExportPanel.tsx modal content for project range, profile controls, and size estimate
+components/Timeline.tsx    trimmed timeline, playhead, seek, and drag ordering
+lib/editor-utils.ts        pure split, duplicate, reorder, and project-time mapping
 lib/history.ts             pure bounded history transitions + React adapter
 lib/ffmpeg-utils.ts        pure validated FFmpeg argument generation
 lib/i18n.ts                English and Chinese resources
@@ -64,7 +68,17 @@ interface EditorState {
 }
 ```
 
-Import creates one object URL and reads one duration at a time before committing clips, then requests persistent browser storage when available. Draft persistence strips URLs; restoration creates fresh URLs from persisted files and merges export defaults for older drafts. All created URLs are revoked on app teardown. Export lazily loads FFmpeg, maps the project range to source trims, sequentially writes only selected files, probes their audio streams, runs a deterministic profile-aware command, downloads output, and deletes temporary MEMFS files.
+Import creates one object URL and reads one duration at a time before committing clips, then requests persistent browser storage when available. Concurrent import requests are blocked, duplicate source files are skipped by stable file metadata, and UI progress reports the current file. Draft persistence strips URLs; restoration creates fresh URLs from persisted files and merges export defaults for older drafts. All created URLs are revoked on app teardown. Export lazily loads FFmpeg, maps the project range to source trims, sequentially writes only selected files, probes their audio streams, runs a deterministic profile-aware command, downloads output, and deletes temporary MEMFS files.
+
+### 4.1 Editing and timeline semantics
+
+Split, duplicate, reorder, project-time lookup, and source-to-project-time mapping live in a pure tested module. Splitting at the active source playhead replaces one clip with two adjacent clips that share the same source `File` and URL but have non-overlapping trim ranges; boundary splits are no-ops. Duplication inserts an independently editable clip immediately after its source. Every discrete operation is one undoable state transition.
+
+Timeline widths represent each clip's trimmed duration rather than raw source duration. Clicking within a clip maps the horizontal ratio to its source trim interval, activates that clip, and seeks after metadata is ready. The active clip renders a playhead at the same normalized position. Native drag and drop reorders clips as one history action, while earlier/later buttons remain available for keyboard and touch users.
+
+### 4.2 Precision, import, and persistence
+
+Range controls expose both a slider and bounded numeric input. Trim uses 0.01-second steps and audio synchronization uses 10-millisecond steps. Import remains sequential to avoid opening many media decoders at once, but reports per-file progress, blocks overlapping imports, skips duplicate file identities, and summarizes skipped/failed items. Draft writes are delayed while a continuous slider edit is active and committed once the interaction ends. Draft restoration is announced to the user.
 
 ## 5. History policy
 
@@ -97,7 +111,7 @@ Inputs are loaded, probed, and written sequentially to reduce transient browser 
 ## 7. Performance and security
 
 - FFmpeg core is lazy-loaded only on export.
-- Draft writes are debounced by 500 ms.
+- Draft writes are debounced by 800 ms, suppressed during continuous edits, and forced after the final checkpoint.
 - COOP/COEP and baseline security headers are applied by Next.js and Netlify.
 - No analytics, trackers, media uploads, or API keys.
 - Browser memory is the project-size ceiling.
@@ -110,7 +124,7 @@ Export configuration is opened from a compact inspector action into a dedicated 
 
 ## 9. Verification
 
-Pure history transitions and FFmpeg argument generation require unit tests. Every release must pass:
+Pure history transitions, editor timeline operations, and FFmpeg argument generation require unit tests. Every release must pass:
 
 ```bash
 npm test

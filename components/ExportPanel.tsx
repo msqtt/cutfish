@@ -42,11 +42,14 @@ export default function ExportPanel({
   const estimatedSize = estimateOutputSizeMB(rangeDuration, profile);
 
   const updateRange = (key: 'rangeStart' | 'rangeEnd', value: number) => {
+    const nextValue = key === 'rangeStart'
+      ? Math.max(0, Math.min(Math.max(0, rangeEnd - 0.1), value))
+      : Math.max(Math.min(projectDuration, rangeStart + 0.1), Math.min(projectDuration, value));
     onChange({
       ...settings,
       rangeStart,
       rangeEnd: settings.rangeEnd === null ? null : rangeEnd,
-      [key]: value,
+      [key]: nextValue,
     }, true);
   };
   const sliderEvents = {
@@ -75,24 +78,30 @@ export default function ExportPanel({
           <span>{t('export_range')}</span>
           <output className="font-mono text-[var(--text)]">{formatTime(rangeStart)} – {formatTime(rangeEnd)}</output>
         </div>
-        <label className="block text-[10px] text-[var(--muted)]">
-          <span className="mb-1 flex justify-between"><span>{t('range_start')}</span><span>{rangeStart.toFixed(1)}s</span></span>
+        <div className="block text-[10px] text-[var(--muted)]">
+          <span className="mb-1 flex items-center justify-between gap-3">
+            <label htmlFor="export-range-start">{t('range_start')}</label>
+            <span className="flex items-center gap-1"><input aria-label={`${t('range_start')} (s)`} type="number" min={0} max={Math.max(0, rangeEnd - 0.1)} step={0.1} value={Number(rangeStart.toFixed(1))} disabled={disabled || projectDuration <= 0} onFocus={onEditStart} onBlur={onEditEnd} onChange={(event) => { if (Number.isFinite(event.currentTarget.valueAsNumber)) updateRange('rangeStart', event.currentTarget.valueAsNumber); }} className="w-20 rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-1 text-right font-mono text-[11px] text-[var(--text)] disabled:opacity-40" />s</span>
+          </span>
           <input
-            type="range" min={0} max={Math.max(0, rangeEnd - 0.1)} step={0.1} value={rangeStart}
+            id="export-range-start" type="range" min={0} max={Math.max(0, rangeEnd - 0.1)} step={0.1} value={rangeStart}
             disabled={disabled || projectDuration <= 0} onChange={(event) => updateRange('rangeStart', Number(event.target.value))}
             {...sliderEvents}
             className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-[var(--border)] accent-indigo-600 disabled:opacity-40"
           />
-        </label>
-        <label className="block text-[10px] text-[var(--muted)]">
-          <span className="mb-1 flex justify-between"><span>{t('range_end')}</span><span>{rangeEnd.toFixed(1)}s</span></span>
+        </div>
+        <div className="block text-[10px] text-[var(--muted)]">
+          <span className="mb-1 flex items-center justify-between gap-3">
+            <label htmlFor="export-range-end">{t('range_end')}</label>
+            <span className="flex items-center gap-1"><input aria-label={`${t('range_end')} (s)`} type="number" min={Math.min(projectDuration, rangeStart + 0.1)} max={projectDuration} step={0.1} value={Number(rangeEnd.toFixed(1))} disabled={disabled || projectDuration <= 0} onFocus={onEditStart} onBlur={onEditEnd} onChange={(event) => { if (Number.isFinite(event.currentTarget.valueAsNumber)) updateRange('rangeEnd', event.currentTarget.valueAsNumber); }} className="w-20 rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-1 text-right font-mono text-[11px] text-[var(--text)] disabled:opacity-40" />s</span>
+          </span>
           <input
-            type="range" min={Math.min(projectDuration, rangeStart + 0.1)} max={projectDuration} step={0.1} value={rangeEnd}
+            id="export-range-end" type="range" min={Math.min(projectDuration, rangeStart + 0.1)} max={projectDuration} step={0.1} value={rangeEnd}
             disabled={disabled || projectDuration <= 0} onChange={(event) => updateRange('rangeEnd', Number(event.target.value))}
             {...sliderEvents}
             className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-[var(--border)] accent-indigo-600 disabled:opacity-40"
           />
-        </label>
+        </div>
         <p className="text-[10px] text-[var(--muted)]">{t('selected_duration', { value: rangeDuration.toFixed(1) })}</p>
       </div>
 
