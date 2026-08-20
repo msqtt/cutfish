@@ -34,6 +34,8 @@ All processing happens locally—your media never leaves your device.
 - **Undo/redo** (50-level bounded history); clip removal preserves undo by not revoking URLs
 - **Dark/light/system theme** with English/Chinese i18n
 - **Responsive design** with mobile bottom-sheet inspector and accessible close
+- **Unified UI system** with a minimum 12px compact type scale, 14px primary actions/headings, consistent 36px form controls and icon targets, full focus-visible coverage, larger mobile touch targets, and 16px mobile inputs to prevent browser zoom
+- **Improved editor interaction** with ARIA tab semantics and arrow-key navigation, horizontally scrollable inspector tabs, pressed-state overlay tools, cancellable range edits, a dedicated keyboard/touch playhead handle, and independently pannable mobile timeline
 - **Accessible** (ARIA labels, keyboard navigation, focus management, live regions, disclosure menus for clip operations, no nested interactive elements)
 - **Zero dependencies** on external servers—fully offline after initial load
 

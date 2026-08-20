@@ -18,7 +18,7 @@ export const metadata: Metadata = {
   twitter: { card: 'summary', title: 'Cutfish', description: 'Private video editing in your browser.' },
 };
 
-export const viewport: Viewport = { themeColor: '#111113', colorScheme: 'dark light' };
+export const viewport: Viewport = { themeColor: '#111113', colorScheme: 'dark light', viewportFit: 'cover' };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (

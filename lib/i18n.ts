@@ -41,7 +41,7 @@ const resources = {
       // Volume / mute / master
       volume: 'Volume', mute: 'Mute', unmute: 'Unmute', master_volume: 'Master volume', clip_volume: 'Clip volume',
       // Timeline zoom / playhead
-      zoom_in: 'Zoom in', zoom_out: 'Zoom out', zoom_fit: 'Fit all',
+      zoom_in: 'Zoom in', zoom_out: 'Zoom out', zoom_fit: 'Fit all', timeline_playhead: 'Project playhead',
       // Rotation / flip / aspect / fit / speed
       rotation: 'Rotation', flip_h: 'Flip horizontal', flip_v: 'Flip vertical',
       aspect: 'Aspect ratio', fit: 'Fit mode', speed: 'Speed',
@@ -102,7 +102,7 @@ const resources = {
       // Output duration
       output_duration: 'Output {{value}}s',
       // Subtitles & Visual Overlays
-      tab_subtitles: 'Subtitles & Overlays',
+      tab_subtitles: 'Overlays',
       subtitles: 'Subtitles', add_subtitle: 'Add subtitle', remove_subtitle: 'Remove',
       subtitle_text: 'Text', subtitle_font: 'Font', subtitle_size: 'Size',
       subtitle_color: 'Color', subtitle_bg: 'Background', subtitle_position: 'Position',
@@ -171,7 +171,7 @@ const resources = {
       // Volume / mute / master
       volume: '音量', mute: '静音', unmute: '取消静音', master_volume: '主音量', clip_volume: '片段音量',
       // Timeline zoom / playhead
-      zoom_in: '放大', zoom_out: '缩小', zoom_fit: '适应全部',
+      zoom_in: '放大', zoom_out: '缩小', zoom_fit: '适应全部', timeline_playhead: '项目播放头',
       // Rotation / flip / aspect / fit / speed
       rotation: '旋转', flip_h: '水平翻转', flip_v: '垂直翻转',
       aspect: '画面比例', fit: '填充模式', speed: '速度',
@@ -232,7 +232,7 @@ const resources = {
       // Output duration
       output_duration: '输出 {{value}} 秒',
       // Subtitles & Visual Overlays
-      tab_subtitles: '字幕与标注',
+      tab_subtitles: '字幕标注',
       subtitles: '字幕', add_subtitle: '添加字幕', remove_subtitle: '移除',
       subtitle_text: '文本', subtitle_font: '字体', subtitle_size: '大小',
       subtitle_color: '颜色', subtitle_bg: '背景色', subtitle_position: '位置',

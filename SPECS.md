@@ -369,3 +369,15 @@ npm run lint
 npm run typecheck
 npm run build
 ```
+
+## 10. UI typography and interaction system
+
+Cutfish uses a compact but readable three-level interface type scale instead of arbitrary pixel sizes:
+
+- **Primary/body and control text:** 14px (`text-sm`) for dialog titles, primary actions, and high-emphasis content.
+- **Labels, metadata, inspector controls, timeline text, and secondary actions:** 12px (`text-xs`) with at least 16px line height. Text below 12px is not permitted.
+- **Section/page emphasis:** 16–18px (`text-base`/`text-lg`) where a modal or processing state needs stronger hierarchy.
+
+All inputs, selects, textareas, buttons, links, summaries, and custom interactive roles share a visible focus ring. Standard form controls have a minimum 36px height; compact buttons have at least a 32px height, icon buttons 36×36px, and coarse-pointer/mobile actions expand toward a 40px minimum target. Disabled states must remain legible and expose a non-interactive cursor. Mobile text inputs use 16px text to prevent browser zoom.
+
+Inspector tabs use `tablist`/`tab`/`tabpanel` semantics, `aria-selected`, horizontal overflow on narrow widths, and stable minimum target widths. Overlay tools expose `aria-pressed` state. Timeline touch scrolling and playhead dragging are separate interactions: the scroll surface remains pannable while the playhead itself is the drag handle. Range sliders handle pointer cancellation and expose a larger interaction track. Motion respects `prefers-reduced-motion`.

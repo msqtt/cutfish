@@ -38,6 +38,30 @@ export default function Timeline({
   const autoFollowRef = useRef(true);
 
   const projectDuration = clips.reduce((sum, clip) => sum + getPlaybackDuration(clip), 0);
+  let activeProjectTime = 0;
+  if (activeClipId) for (const clip of clips) {
+    if (clip.id === activeClipId) {
+      const sourceDuration = Math.max(0.01, clip.trimEnd - clip.trimStart);
+      const ratio = Math.max(0, Math.min(1, (currentTime - clip.trimStart) / sourceDuration));
+      activeProjectTime += ratio * getPlaybackDuration(clip);
+      break;
+    }
+    activeProjectTime += getPlaybackDuration(clip);
+  }
+
+  const seekProjectTime = useCallback((projectTime: number) => {
+    let cursor = 0;
+    const target = Math.max(0, Math.min(projectDuration, projectTime));
+    for (const clip of clips) {
+      const playbackDuration = getPlaybackDuration(clip);
+      if (target <= cursor + playbackDuration || clip === clips[clips.length - 1]) {
+        const ratio = Math.max(0, Math.min(1, (target - cursor) / playbackDuration));
+        onSeek(clip.id, clip.trimStart + ratio * (clip.trimEnd - clip.trimStart));
+        return;
+      }
+      cursor += playbackDuration;
+    }
+  }, [clips, onSeek, projectDuration]);
 
   // Auto-follow: scroll to keep playhead visible
   useEffect(() => {
@@ -99,9 +123,11 @@ export default function Timeline({
       autoFollowRef.current = true;
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
     // Fire initial
     onMove(event.nativeEvent as unknown as globalThis.PointerEvent);
   }, [clips, onSeek, zoom]);
@@ -124,7 +150,7 @@ export default function Timeline({
 
   if (collapsed) {
     return (
-      <div className="flex h-8 items-center justify-center text-[10px] text-[var(--muted)]">
+      <div className="flex h-8 items-center justify-center text-xs text-[var(--muted)]">
         {clips.length} {t('video_track').toLowerCase()} · {projectDuration.toFixed(1)}s
       </div>
     );
@@ -148,19 +174,33 @@ export default function Timeline({
   return (
     <div
       ref={containerRef}
-      role="list"
+      role="group"
       aria-label={t('project_timeline')}
-      className="relative flex flex-1 items-center gap-2 overflow-x-auto p-3"
-      onPointerDown={handlePlayheadDrag}
-      style={{ cursor: draggingPlayhead ? 'col-resize' : undefined }}
+      className="relative flex flex-1 touch-pan-x items-center gap-2 overflow-x-auto p-3"
     >
-      {/* Global playhead indicator */}
+      {/* Global playhead: dedicated drag handle keeps the timeline surface touch-scrollable. */}
       {clips.length > 0 && (
-        <span
-          className="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)] transition-[left]"
+        <div
+          role="slider"
+          tabIndex={0}
+          aria-label={t('timeline_playhead')}
+          aria-valuemin={0}
+          aria-valuemax={Number(projectDuration.toFixed(2))}
+          aria-valuenow={Number(activeProjectTime.toFixed(2))}
+          className="absolute inset-y-0 z-20 w-5 -translate-x-1/2 cursor-col-resize touch-none rounded focus-visible:bg-amber-400/15"
           style={{ left: `${playheadPx + 12}px` }}
-          aria-hidden="true"
-        />
+          onPointerDown={handlePlayheadDrag}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+            event.preventDefault();
+            event.stopPropagation();
+            const direction = event.key === 'ArrowLeft' ? -1 : 1;
+            seekProjectTime(activeProjectTime + direction * (event.shiftKey ? 1 : 0.1));
+          }}
+        >
+          <span className="pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)]" aria-hidden="true" />
+          <span className="pointer-events-none absolute left-1/2 top-0 h-2.5 w-2.5 -translate-x-1/2 rounded-b bg-amber-400" aria-hidden="true" />
+        </div>
       )}
       {clips.map((clip, index) => {
         const sourceDuration = Math.max(0.01, clip.trimEnd - clip.trimStart);
@@ -172,7 +212,6 @@ export default function Timeline({
         return (
           <div
             key={clip.id}
-            role="listitem"
             className={`relative shrink-0 rounded-md ${dropIndex === index && draggedId !== clip.id ? 'ring-2 ring-indigo-400 ring-offset-2 ring-offset-[var(--panel)]' : ''}`}
             style={{ width: `${Math.max(120, duration * 14 * zoom)}px` }}
             onDragOver={(event) => { event.preventDefault(); setDropIndex(index); }}
@@ -202,8 +241,8 @@ export default function Timeline({
             >
               <span className="absolute inset-0 bg-gradient-to-r from-indigo-500/15 via-transparent to-cyan-500/10" />
               {active && <span className="absolute inset-y-0 z-10 w-0.5 bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)]" style={{ left: `${localPlayhead}%` }} aria-hidden="true" />}
-              <span className="relative block truncate px-3 pt-3 text-[10px] font-medium">{clip.name}</span>
-              <span className="relative block px-3 pt-1 font-mono text-[9px] text-[var(--muted)]">{duration.toFixed(2)}s</span>
+              <span className="relative block truncate px-3 pt-3 text-xs font-medium">{clip.name}</span>
+              <span className="relative block px-3 pt-1 font-mono text-xs text-[var(--muted)]">{duration.toFixed(2)}s</span>
             </button>
           </div>
         );

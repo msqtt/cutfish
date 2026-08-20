@@ -82,6 +82,7 @@ export interface EditorState {
 }
 
 type InspectorTab = 'clip' | 'project' | 'audio' | 'effects' | 'subtitles';
+const INSPECTOR_TABS: InspectorTab[] = ['clip', 'project', 'audio', 'effects', 'subtitles'];
 type MobilePanel = 'media' | 'inspector' | null;
 type Toast = { kind: 'success' | 'error'; message: string } | null;
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
@@ -100,7 +101,7 @@ const DEFAULT_STATE: EditorState = {
   backgroundMusic: null, presetName: null,
   subtitles: [], visualOverlays: [],
 };
-const iconButton = 'rounded-md p-2 text-[var(--muted)] transition hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-30';
+const iconButton = 'inline-flex min-h-9 min-w-9 items-center justify-center rounded-md p-2 text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-30';
 
 // ─── RangeControl ────────────────────────────────────────────────────────────
 
@@ -139,16 +140,16 @@ function RangeControl({
             onChange={(event) => updateValue(event.currentTarget.valueAsNumber)}
             onKeyDown={(event) => { onEditStart(); if (event.key === 'Enter') event.currentTarget.blur(); }}
             onBlur={onEditEnd}
-            className="w-20 rounded border border-[var(--border)] bg-[var(--raised)] px-1.5 py-1 text-right font-mono text-[11px] text-[var(--text)] disabled:opacity-40"
+            className="w-20 rounded border border-[var(--border)] bg-[var(--raised)] px-1.5 py-1 text-right font-mono text-xs text-[var(--text)] disabled:opacity-40"
           />
-          <span className="min-w-4 text-[10px]">{unit}</span>
+          <span className="min-w-4 text-xs">{unit}</span>
         </div>
       </div>
       <input
         id={`${id}-range`} type="range" aria-label={label} min={min} max={max} step={step} value={value} disabled={disabled}
-        onPointerDown={onEditStart} onPointerUp={onEditEnd} onKeyDown={onEditStart}
+        onPointerDown={onEditStart} onPointerUp={onEditEnd} onPointerCancel={onEditEnd} onKeyDown={onEditStart}
         onKeyUp={onEditEnd} onBlur={onEditEnd} onChange={(event) => updateValue(Number(event.target.value))}
-        className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-[var(--border)] accent-indigo-600 disabled:cursor-not-allowed disabled:opacity-40"
+        className="h-5 w-full touch-pan-y cursor-pointer appearance-none rounded-full accent-indigo-600 disabled:cursor-not-allowed disabled:opacity-40"
       />
     </div>
   );
@@ -1089,13 +1090,22 @@ export default function Editor() {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      const editing = target?.matches('input, textarea, select, button, summary, [contenteditable="true"]');
+      const editing = target?.matches('input, textarea, select, button, summary, [role="slider"], [contenteditable="true"]');
 
       if (event.code === 'Escape') {
         if (showHelpModal) { event.preventDefault(); setShowHelpModal(false); return; }
         if (showProjectManager) { event.preventDefault(); setShowProjectManager(false); return; }
         if (exportModalOpen) { event.preventDefault(); closeExportModal(); return; }
         if (mobilePanel) { event.preventDefault(); setMobilePanel(null); return; }
+        if (overlayTool !== 'select') {
+          event.preventDefault();
+          drawingRef.current = { points: [], active: false };
+          rectDrawRef.current = { startX: 0, startY: 0, active: false };
+          setDraftPenPoints([]);
+          setDraftRect(null);
+          setOverlayTool('select');
+          return;
+        }
       }
       if (exportModalOpen || showHelpModal || showProjectManager || editing) return;
 
@@ -1123,7 +1133,7 @@ export default function Editor() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeClip, closeExportModal, exportModalOpen, handleExport, mobilePanel, redo, removeClip, seek, showHelpModal, showProjectManager, splitActiveClip, toggleFullscreen, togglePlay, undo, updateState]);
+  }, [activeClip, closeExportModal, exportModalOpen, handleExport, mobilePanel, overlayTool, redo, removeClip, seek, showHelpModal, showProjectManager, splitActiveClip, toggleFullscreen, togglePlay, undo, updateState]);
 
   // ─── State Updaters ──────────────────────────────────────────────────────
 
@@ -1430,7 +1440,7 @@ export default function Editor() {
           <div className="flex min-w-0 items-center gap-2 font-semibold">
             <MonitorPlay className="h-5 w-5 shrink-0 text-indigo-500" aria-hidden="true" />
             <h1 className="truncate text-sm">{t('app_title')}</h1>
-            <span className="hidden rounded border border-indigo-500/30 px-1.5 py-0.5 text-[9px] font-medium text-indigo-500 sm:inline">{t('wasm_powered')}</span>
+            <span className="hidden rounded border border-indigo-500/30 px-1.5 py-0.5 text-xs font-medium text-indigo-500 sm:inline">{t('wasm_powered')}</span>
           </div>
           <div className="flex items-center border-l border-[var(--border)] pl-2 sm:pl-4">
             <button onClick={undo} disabled={!canUndo} className={iconButton} aria-label={`${t('undo')} (Ctrl+Z)`} title={`${t('undo')} (Ctrl+Z)`}><Undo2 className="h-4 w-4" /></button>
@@ -1439,7 +1449,7 @@ export default function Editor() {
         </div>
         <div className="flex shrink-0 items-center gap-1.5 sm:gap-3">
           {/* Save status */}
-          <span className="hidden items-center gap-2 text-[11px] text-[var(--muted)] md:flex">
+          <span className="hidden items-center gap-2 text-xs text-[var(--muted)] md:flex">
             <span className={`h-2 w-2 rounded-full ${saveStatus === 'error' ? 'bg-red-500' : saveStatus === 'saving' ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`} />
             {saveStatus === 'saving' ? t('saving') : saveStatus === 'error' ? t('save_error') : lastSavedTime ? t('last_saved', { time: new Date(lastSavedTime).toLocaleTimeString(i18n.resolvedLanguage?.startsWith('zh') ? 'zh-CN' : 'en', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }) : t('auto_save')}
           </span>
@@ -1447,7 +1457,7 @@ export default function Editor() {
           <button onClick={() => setShowHelpModal(true)} className={`${iconButton} hidden sm:inline-flex`} aria-label={t('keyboard_shortcuts')} title={t('shortcut_help')}><HelpCircle className="h-4 w-4" /></button>
           <button onClick={() => setMobilePanel('media')} className={`${iconButton} lg:hidden`} aria-label={t('media_assets')}><FileVideo className="h-4 w-4" /></button>
           <button onClick={() => setMobilePanel('inspector')} className={`${iconButton} lg:hidden`} aria-label={t('inspector')}><SlidersHorizontal className="h-4 w-4" /></button>
-          <button onClick={() => void i18n.changeLanguage(i18n.resolvedLanguage?.startsWith('zh') ? 'en' : 'zh')} className="rounded-md border border-[var(--border)] px-2.5 py-1.5 text-[11px] hover:bg-[var(--raised)]" aria-label={t('language')}>{i18n.resolvedLanguage?.startsWith('zh') ? 'EN' : '中文'}</button>
+          <button onClick={() => void i18n.changeLanguage(i18n.resolvedLanguage?.startsWith('zh') ? 'en' : 'zh')} className="rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs hover:bg-[var(--raised)]" aria-label={t('language')}>{i18n.resolvedLanguage?.startsWith('zh') ? 'EN' : '中文'}</button>
           <button onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')} className={iconButton} aria-label={resolvedTheme === 'dark' ? t('light_mode') : t('dark_mode')}>{resolvedTheme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}</button>
         </div>
       </header>
@@ -1459,7 +1469,7 @@ export default function Editor() {
         {/* ─── Media Panel (Left) ──────────────────────────────────────── */}
         <aside className={`absolute inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)] transition-transform lg:static lg:w-64 lg:translate-x-0 ${mobilePanel === 'media' ? 'translate-x-0' : '-translate-x-full'}`} aria-label={t('media_assets')}>
           <div className="flex h-11 items-center justify-between border-b border-[var(--border)] px-3">
-            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--muted)]">{t('media_assets')}</span>
+            <span className="text-xs font-bold uppercase tracking-widest text-[var(--muted)]">{t('media_assets')}</span>
             <div className="flex items-center gap-1">
               <button onClick={() => { void refreshProjects(); setShowProjectManager(true); setMobilePanel(null); }} className={`${iconButton} sm:hidden`} aria-label={t('projects')} title={t('projects')}><Menu className="h-4 w-4" /></button>
               <button onClick={() => { setShowHelpModal(true); setMobilePanel(null); }} className={`${iconButton} sm:hidden`} aria-label={t('keyboard_shortcuts')} title={t('shortcut_help')}><HelpCircle className="h-4 w-4" /></button>
@@ -1473,11 +1483,11 @@ export default function Editor() {
                 <button onClick={() => { replaceState((current) => ({ ...current, activeClipId: clip.id })); setMobilePanel(null); }} className="block w-full rounded text-left" aria-current={state.activeClipId === clip.id ? 'true' : undefined}>
                   <span className="relative flex aspect-video items-center justify-center overflow-hidden rounded bg-gradient-to-br from-indigo-500/20 via-[var(--canvas)] to-cyan-500/10">
                     <FileVideo className="h-7 w-7 text-indigo-500/60" aria-hidden="true" />
-                    <span className="absolute bottom-1.5 right-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">{t('duration', { value: clip.duration.toFixed(1) })}</span>
+                    <span className="absolute bottom-1.5 right-1.5 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white">{t('duration', { value: clip.duration.toFixed(1) })}</span>
                     {clip.muted && <span className="absolute left-1.5 top-1.5"><VolumeX className="h-3 w-3 text-red-400" /></span>}
                   </span>
                   {renamingClipId !== clip.id && (
-                    <span className="mt-1 block truncate px-0.5 text-[11px]">{clip.displayName}</span>
+                    <span className="mt-1 block truncate px-0.5 text-xs">{clip.displayName}</span>
                   )}
                 </button>
                 {/* M6: Input outside button to avoid invalid nesting */}
@@ -1485,14 +1495,14 @@ export default function Editor() {
                   <input
                     autoFocus
                     defaultValue={clip.displayName}
-                    className="mt-1 block w-full rounded border border-indigo-500 bg-[var(--panel)] px-1 text-[11px]"
+                    className="mt-1 block w-full rounded border border-indigo-500 bg-[var(--panel)] px-1 text-xs"
                     onBlur={(e) => renameClip(clip.id, e.currentTarget.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') renameClip(clip.id, e.currentTarget.value); if (e.key === 'Escape') setRenamingClipId(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') renameClip(clip.id, e.currentTarget.value); if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setRenamingClipId(null); } }}
                   />
                 )}
                 {/* M8: Accessible per-clip disclosure/menu */}
                 <details className="mt-1 border-t border-[var(--border)] pt-1">
-                  <summary className={`${iconButton} flex w-full cursor-pointer items-center justify-center gap-1 text-[10px]`} aria-label={t('more_actions')}><Menu className="h-3.5 w-3.5" /><span className="sr-only sm:not-sr-only">{t('actions')}</span></summary>
+                  <summary className={`${iconButton} flex w-full cursor-pointer items-center justify-center gap-1 text-xs`} aria-label={t('more_actions')}><Menu className="h-3.5 w-3.5" /><span className="sr-only sm:not-sr-only">{t('actions')}</span></summary>
                   <div className="mt-1 flex flex-wrap justify-end gap-0.5" role="menu">
                     <button role="menuitem" onClick={() => setRenamingClipId(clip.id)} className={iconButton} aria-label={t('rename_clip')} title={t('rename')}><Edit2 className="h-3.5 w-3.5" /></button>
                     <button role="menuitem" onClick={() => duplicateClipById(clip.id)} className={iconButton} aria-label={`${t('duplicate')} ${clip.displayName}`} title={t('duplicate')}><Copy className="h-3.5 w-3.5" /></button>
@@ -1511,7 +1521,7 @@ export default function Editor() {
         <section ref={previewContainerRef} className="relative flex min-w-0 flex-1 flex-col bg-[var(--canvas)]" aria-label={t('preview')}>
           {importProgress && (
             <div className="absolute left-1/2 top-3 z-30 w-[min(90%,24rem)] -translate-x-1/2 rounded-lg border border-indigo-400/30 bg-[var(--panel)] p-3 shadow-xl" role="status" aria-live="polite">
-              <div className="flex items-center justify-between gap-3 text-[11px]"><span className="truncate">{t('importing_file', { name: importProgress.name })}</span><span className="font-mono">{importProgress.current}/{importProgress.total}</span></div>
+              <div className="flex items-center justify-between gap-3 text-xs"><span className="truncate">{t('importing_file', { name: importProgress.name })}</span><span className="font-mono">{importProgress.current}/{importProgress.total}</span></div>
               <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--border)]"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${importProgress.current / importProgress.total * 100}%` }} /></div>
             </div>
           )}
@@ -1675,7 +1685,7 @@ export default function Editor() {
                   }
                   return null;
                 })}
-                <span className="absolute left-3 top-3 z-20 rounded bg-black/70 px-2 py-1 font-mono text-[10px] text-white" aria-live="off">{currentTime.toFixed(2)}s / {activeClip.duration.toFixed(2)}s</span>
+                <span className="absolute left-3 top-3 z-20 rounded bg-black/70 px-2 py-1 font-mono text-xs text-white" aria-live="off">{currentTime.toFixed(2)}s / {activeClip.duration.toFixed(2)}s</span>
                 {/* Draft pen/rect drawing preview */}
                 {draftPenPoints.length >= 2 && (
                   <svg className="pointer-events-none absolute inset-0 z-25 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -1694,7 +1704,7 @@ export default function Editor() {
                 )}
                 {/* Overlay tool indicator */}
                 {overlayTool !== 'select' && (
-                  <span className="absolute left-3 bottom-3 z-30 rounded bg-indigo-600/90 px-2 py-1 text-[10px] text-white" role="status">
+                  <span className="absolute left-3 bottom-3 z-30 rounded bg-indigo-600/90 px-2 py-1 text-xs text-white" role="status">
                     {overlayTool === 'pen' ? t('drawing_mode') : t('rect_mode')}
                   </span>
                 )}
@@ -1731,20 +1741,43 @@ export default function Editor() {
 
         {/* ─── Inspector (Right) ───────────────────────────────────────── */}
         <aside className={`fixed inset-x-0 bottom-0 z-30 flex max-h-[70dvh] flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--panel)] transition-transform lg:static lg:inset-auto lg:max-h-none lg:w-72 lg:rounded-none lg:border-l lg:border-t-0 ${mobilePanel === 'inspector' ? 'translate-y-0' : 'translate-y-full lg:translate-y-0'}`} aria-label={t('inspector')} role={mobilePanel === 'inspector' ? 'dialog' : undefined} aria-modal={mobilePanel === 'inspector' ? true : undefined}>
+          <div className="flex h-3 shrink-0 items-center justify-center lg:hidden" aria-hidden="true"><span className="h-1 w-10 rounded-full bg-[var(--border)]" /></div>
           {/* Tab Bar */}
-          <div className="flex h-11 shrink-0 items-center border-b border-[var(--border)] px-1">
-            {(['clip', 'project', 'audio', 'effects', 'subtitles'] as const).map((tab) => (
-              <button key={tab} onClick={() => setInspectorTab(tab)} className={`flex-1 px-1 py-2 text-[10px] font-medium transition ${inspectorTab === tab ? 'border-b-2 border-indigo-500 text-indigo-500' : 'text-[var(--muted)] hover:text-[var(--text)]'}`} aria-current={inspectorTab === tab ? 'page' : undefined}>{t(`tab_${tab}`)}</button>
-            ))}
-            <button onClick={() => setMobilePanel(null)} className={`${iconButton} lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
+          <div className="flex min-h-12 shrink-0 items-center border-b border-[var(--border)] px-1">
+            <div role="tablist" aria-label={t('inspector')} className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto">
+              {INSPECTOR_TABS.map((tab) => (
+                <button
+                  key={tab}
+                  id={`inspector-tab-${tab}`}
+                  role="tab"
+                  aria-selected={inspectorTab === tab}
+                  aria-controls="inspector-panel"
+                  tabIndex={inspectorTab === tab ? 0 : -1}
+                  onClick={() => setInspectorTab(tab)}
+                  onKeyDown={(event) => {
+                    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+                    event.preventDefault();
+                    const currentIndex = INSPECTOR_TABS.indexOf(tab);
+                    const nextIndex = event.key === 'Home' ? 0
+                      : event.key === 'End' ? INSPECTOR_TABS.length - 1
+                        : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + INSPECTOR_TABS.length) % INSPECTOR_TABS.length;
+                    const nextTab = INSPECTOR_TABS[nextIndex];
+                    setInspectorTab(nextTab);
+                    window.requestAnimationFrame(() => document.getElementById(`inspector-tab-${nextTab}`)?.focus());
+                  }}
+                  className={`min-h-11 min-w-14 flex-1 whitespace-nowrap rounded-t-md px-2 py-2 text-xs font-medium transition-colors ${inspectorTab === tab ? 'border-b-2 border-indigo-500 bg-indigo-500/5 text-indigo-500' : 'text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]'}`}
+                >{t(`tab_${tab}`)}</button>
+              ))}
+            </div>
+            <button onClick={() => setMobilePanel(null)} className={`${iconButton} ml-1 lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-5">
+          <div id="inspector-panel" role="tabpanel" aria-labelledby={`inspector-tab-${inspectorTab}`} className="flex-1 space-y-6 overflow-y-auto p-4">
             {/* ── Clip Tab ─────────────────────────────────────────────── */}
             {inspectorTab === 'clip' && (
               <>
                 <section aria-labelledby="trim-heading">
-                  <h2 id="trim-heading" className="mb-3 text-xs font-medium">{t('trim')}</h2>
+                  <h2 id="trim-heading" className="mb-3 text-sm font-semibold">{t('trim')}</h2>
                   <div className="space-y-4">
                     <RangeControl label={t('trim_start')} value={activeClip?.trimStart ?? 0} min={0} max={Math.max(0, (activeClip?.trimEnd ?? 0) - 0.01)} step={0.01} unit="s" disabled={!activeClip} onChange={(value) => updateTrim('trimStart', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <RangeControl label={t('trim_end')} value={activeClip?.trimEnd ?? 0} min={Math.min(activeClip?.duration ?? 0, (activeClip?.trimStart ?? 0) + 0.01)} max={activeClip?.duration ?? 0} step={0.01} unit="s" disabled={!activeClip} onChange={(value) => updateTrim('trimEnd', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
@@ -1752,7 +1785,7 @@ export default function Editor() {
                 </section>
                 {/* Volume / Mute */}
                 <section aria-labelledby="clip-vol-heading">
-                  <h2 id="clip-vol-heading" className="mb-3 text-xs font-medium">{t('clip_volume')}</h2>
+                  <h2 id="clip-vol-heading" className="mb-3 text-sm font-semibold">{t('clip_volume')}</h2>
                   <div className="space-y-3">
                     <RangeControl label={t('volume')} value={activeClip?.volume ?? 100} min={0} max={200} disabled={!activeClip} onChange={(v) => activeClip && updateClipField(activeClip.id, 'volume', v)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <button disabled={!activeClip} onClick={() => activeClip && updateState((c) => ({ ...c, clips: c.clips.map((cl) => cl.id === activeClip.id ? { ...cl, muted: !cl.muted } : cl) }))} className={`flex items-center gap-2 rounded px-2 py-1 text-xs ${activeClip?.muted ? 'text-red-500' : 'text-[var(--muted)]'} hover:bg-[var(--raised)] disabled:opacity-40`}>
@@ -1763,23 +1796,23 @@ export default function Editor() {
                 </section>
                 {/* Rotation / Flip */}
                 <section aria-labelledby="transform-heading">
-                  <h2 id="transform-heading" className="mb-3 text-xs font-medium">{t('rotation')}</h2>
+                  <h2 id="transform-heading" className="mb-3 text-sm font-semibold">{t('rotation')}</h2>
                   <div className="space-y-3">
                     <div className="flex items-center gap-2">
-                      <label className="text-[10px] text-[var(--muted)] w-16">{t('rotation')}</label>
+                      <label className="text-xs text-[var(--muted)] w-16">{t('rotation')}</label>
                       <select disabled={!activeClip} value={activeClip?.rotation ?? 0} onChange={(e) => activeClip && updateState((c) => ({ ...c, clips: c.clips.map((cl) => cl.id === activeClip.id ? { ...cl, rotation: Number(e.target.value) as 0 | 90 | 180 | 270 } : cl) }))} className="flex-1 rounded border border-[var(--border)] bg-[var(--raised)] px-2 py-1 text-xs">
                         <option value={0}>0°</option><option value={90}>90°</option><option value={180}>180°</option><option value={270}>270°</option>
                       </select>
                     </div>
                     <div className="flex gap-2">
-                      <button disabled={!activeClip} onClick={() => activeClip && updateState((c) => ({ ...c, clips: c.clips.map((cl) => cl.id === activeClip.id ? { ...cl, flipH: !cl.flipH } : cl) }))} className={`flex-1 rounded border px-2 py-1.5 text-[10px] ${activeClip?.flipH ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'} disabled:opacity-40`}>{t('flip_h')}</button>
-                      <button disabled={!activeClip} onClick={() => activeClip && updateState((c) => ({ ...c, clips: c.clips.map((cl) => cl.id === activeClip.id ? { ...cl, flipV: !cl.flipV } : cl) }))} className={`flex-1 rounded border px-2 py-1.5 text-[10px] ${activeClip?.flipV ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'} disabled:opacity-40`}>{t('flip_v')}</button>
+                      <button disabled={!activeClip} onClick={() => activeClip && updateState((c) => ({ ...c, clips: c.clips.map((cl) => cl.id === activeClip.id ? { ...cl, flipH: !cl.flipH } : cl) }))} className={`flex-1 rounded border px-2 py-1.5 text-xs ${activeClip?.flipH ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'} disabled:opacity-40`}>{t('flip_h')}</button>
+                      <button disabled={!activeClip} onClick={() => activeClip && updateState((c) => ({ ...c, clips: c.clips.map((cl) => cl.id === activeClip.id ? { ...cl, flipV: !cl.flipV } : cl) }))} className={`flex-1 rounded border px-2 py-1.5 text-xs ${activeClip?.flipV ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'} disabled:opacity-40`}>{t('flip_v')}</button>
                     </div>
                   </div>
                 </section>
                 {/* Speed */}
                 <section aria-labelledby="speed-heading">
-                  <h2 id="speed-heading" className="mb-3 text-xs font-medium">{t('speed')}</h2>
+                  <h2 id="speed-heading" className="mb-3 text-sm font-semibold">{t('speed')}</h2>
                   <RangeControl label={t('speed')} value={activeClip?.speed ?? 1} min={0.25} max={4} step={0.25} unit="×" disabled={!activeClip} onChange={(v) => activeClip && updateState((c) => ({ ...c, clips: c.clips.map((cl) => cl.id === activeClip.id ? { ...cl, speed: v } : cl) }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                 </section>
               </>
@@ -1790,30 +1823,30 @@ export default function Editor() {
               <>
                 {/* Canvas Aspect */}
                 <section aria-labelledby="aspect-heading">
-                  <h2 id="aspect-heading" className="mb-3 text-xs font-medium">{t('aspect')}</h2>
+                  <h2 id="aspect-heading" className="mb-3 text-sm font-semibold">{t('aspect')}</h2>
                   <div className="grid grid-cols-3 gap-1.5">
                     {(['16:9', '9:16', '4:3', '1:1', 'auto'] as CanvasAspect[]).map((a) => (
-                      <button key={a} onClick={() => updateState((c) => ({ ...c, canvasAspect: a, presetName: null }))} className={`rounded border px-2 py-1.5 text-[10px] ${state.canvasAspect === a ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{a}</button>
+                      <button key={a} onClick={() => updateState((c) => ({ ...c, canvasAspect: a, presetName: null }))} className={`rounded border px-2 py-1.5 text-xs ${state.canvasAspect === a ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{a}</button>
                     ))}
                   </div>
                 </section>
                 {/* Fit Mode */}
                 <section aria-labelledby="fit-heading">
-                  <h2 id="fit-heading" className="mb-3 text-xs font-medium">{t('fit')}</h2>
+                  <h2 id="fit-heading" className="mb-3 text-sm font-semibold">{t('fit')}</h2>
                   <div className="grid grid-cols-3 gap-1.5">
                     {(['contain', 'cover', 'stretch'] as CanvasFit[]).map((f) => (
-                      <button key={f} onClick={() => updateState((c) => ({ ...c, canvasFit: f, presetName: null }))} className={`rounded border px-2 py-1.5 text-[10px] ${state.canvasFit === f ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{t(f)}</button>
+                      <button key={f} onClick={() => updateState((c) => ({ ...c, canvasFit: f, presetName: null }))} className={`rounded border px-2 py-1.5 text-xs ${state.canvasFit === f ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{t(f)}</button>
                     ))}
                   </div>
                 </section>
                 {/* Master Volume */}
                 <section aria-labelledby="master-vol-heading">
-                  <h2 id="master-vol-heading" className="mb-3 text-xs font-medium">{t('master_volume')}</h2>
+                  <h2 id="master-vol-heading" className="mb-3 text-sm font-semibold">{t('master_volume')}</h2>
                   <RangeControl label={t('volume')} value={state.masterVolume} min={0} max={200} onChange={(v) => replaceState((c) => ({ ...c, masterVolume: v }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                 </section>
                 {/* Presets */}
                 <section aria-labelledby="presets-heading">
-                  <h2 id="presets-heading" className="mb-3 text-xs font-medium">{t('presets')}</h2>
+                  <h2 id="presets-heading" className="mb-3 text-sm font-semibold">{t('presets')}</h2>
                   <div className="space-y-1.5">
                     {getPresetNames().map((name) => (
                       <button key={name} onClick={() => {
@@ -1830,7 +1863,7 @@ export default function Editor() {
                           exportSettings: applied.exportSettings,
                           presetName: applied.presetName,
                         }));
-                      }} className={`w-full rounded border px-3 py-2 text-left text-[11px] ${state.presetName === name ? 'border-indigo-500 bg-indigo-500/10' : 'border-[var(--border)] hover:border-indigo-400'}`}>
+                      }} className={`w-full rounded border px-3 py-2 text-left text-xs ${state.presetName === name ? 'border-indigo-500 bg-indigo-500/10' : 'border-[var(--border)] hover:border-indigo-400'}`}>
                         <strong className="block">{t(`preset_${name.replace('-', '_')}` as string)}</strong>
                         <span className="text-[var(--muted)]">{PRESETS[name].description[i18n.resolvedLanguage?.startsWith('zh') ? 'zh' : 'en']}</span>
                       </button>
@@ -1839,10 +1872,10 @@ export default function Editor() {
                 </section>
                 {/* M5: Custom presets */}
                 <section aria-labelledby="custom-presets-heading">
-                  <h2 id="custom-presets-heading" className="mb-3 text-xs font-medium">{t('custom_presets')}</h2>
+                  <h2 id="custom-presets-heading" className="mb-3 text-sm font-semibold">{t('custom_presets')}</h2>
                   <div className="space-y-1.5">
                     {customPresets.map((cp) => (
-                      <div key={cp.name} className={`flex items-center gap-1 rounded border px-3 py-2 text-[11px] ${state.presetName === cp.name ? 'border-indigo-500 bg-indigo-500/10' : 'border-[var(--border)]'}`}>
+                      <div key={cp.name} className={`flex items-center gap-1 rounded border px-3 py-2 text-xs ${state.presetName === cp.name ? 'border-indigo-500 bg-indigo-500/10' : 'border-[var(--border)]'}`}>
                         <button className="flex-1 text-left" onClick={() => {
                           const applied = applyCustomPreset({
                             canvasAspect: state.canvasAspect,
@@ -1860,14 +1893,14 @@ export default function Editor() {
                       if (!name?.trim()) return;
                       setCustomPresets(saveCustomPreset({ name: name.trim(), canvasAspect: state.canvasAspect, canvasFit: state.canvasFit, exportSettings: { resolution: state.exportSettings.resolution, frameRate: state.exportSettings.frameRate, quality: state.exportSettings.quality } }));
                       setToast({ kind: 'success', message: t('preset_saved') });
-                    }} className="flex w-full items-center justify-center gap-1 rounded border border-dashed border-[var(--border)] px-3 py-2 text-[10px] text-[var(--muted)] hover:border-indigo-500 hover:text-indigo-500">
+                    }} className="flex w-full items-center justify-center gap-1 rounded border border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted)] hover:border-indigo-500 hover:text-indigo-500">
                       <Plus className="h-3 w-3" />{t('save_preset')}
                     </button>
                   </div>
                 </section>
                 {/* Playback Speed (preview) */}
                 <section aria-labelledby="playback-speed-heading">
-                  <h2 id="playback-speed-heading" className="mb-3 text-xs font-medium">{t('speed')} ({t('preview')})</h2>
+                  <h2 id="playback-speed-heading" className="mb-3 text-sm font-semibold">{t('speed')} ({t('preview')})</h2>
                   <RangeControl label={t('speed')} value={state.playbackSpeed} min={0.25} max={4} step={0.25} unit="×" onChange={(v) => replaceState((c) => ({ ...c, playbackSpeed: v }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                 </section>
               </>
@@ -1877,26 +1910,26 @@ export default function Editor() {
             {inspectorTab === 'audio' && (
               <>
                 <section aria-labelledby="audio-heading">
-                  <h2 id="audio-heading" className="mb-3 text-xs font-medium">{t('audio')} <span className="text-[var(--muted)]">· {t('global')}</span></h2>
+                  <h2 id="audio-heading" className="mb-3 text-sm font-semibold">{t('audio')} <span className="text-[var(--muted)]">· {t('global')}</span></h2>
                   <div className="space-y-4">
                     <RangeControl label={t('audio_sync')} value={state.audioDelay} min={-5000} max={5000} step={10} unit="ms" onChange={(value) => replaceState((current) => ({ ...current, audioDelay: value }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <RangeControl label={t('fade_in')} value={state.audioFade.fadeIn} min={0} max={30} step={0.1} unit="s" onChange={(value) => replaceState((current) => ({ ...current, audioFade: { ...current.audioFade, fadeIn: value } }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <RangeControl label={t('fade_out')} value={state.audioFade.fadeOut} min={0} max={30} step={0.1} unit="s" onChange={(value) => replaceState((current) => ({ ...current, audioFade: { ...current.audioFade, fadeOut: value } }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
-                    <p className="text-[10px] leading-4 text-[var(--muted)]">{t('fade_hint')}</p>
+                    <p className="text-xs leading-4 text-[var(--muted)]">{t('fade_hint')}</p>
                   </div>
                 </section>
                 {/* Background Audio */}
                 <section aria-labelledby="bg-audio-heading">
-                  <h2 id="bg-audio-heading" className="mb-3 text-xs font-medium">{t('background_audio')}</h2>
+                  <h2 id="bg-audio-heading" className="mb-3 text-sm font-semibold">{t('background_audio')}</h2>
                   {state.backgroundMusic ? (
                     <div className="space-y-3">
                       <div className="flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--raised)] p-2">
                         <Music className="h-4 w-4 text-indigo-500 shrink-0" />
-                        <span className="flex-1 truncate text-[11px]">{state.backgroundMusic.name}</span>
+                        <span className="flex-1 truncate text-xs">{state.backgroundMusic.name}</span>
                         <button onClick={() => updateState((c) => ({ ...c, backgroundMusic: null }))} className="text-red-500 hover:text-red-400" aria-label={t('remove_audio')}><Trash2 className="h-3.5 w-3.5" /></button>
                       </div>
                       <RangeControl label={t('audio_volume')} value={state.backgroundMusic.volume} min={0} max={200} onChange={(v) => replaceState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, volume: v } : null }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
-                      <label className="flex items-center gap-2 text-[11px] text-[var(--muted)]">
+                      <label className="flex items-center gap-2 text-xs text-[var(--muted)]">
                         <input type="checkbox" checked={state.backgroundMusic.loop} onChange={(e) => updateState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, loop: e.target.checked } : null }))} className="accent-indigo-500" />
                         {t('audio_loop')}
                       </label>
@@ -1917,7 +1950,7 @@ export default function Editor() {
               <>
                 {/* Filters */}
                 <section aria-labelledby="filters-heading">
-                  <div className="mb-3 flex items-center justify-between gap-2"><h2 id="filters-heading" className="text-xs font-medium">{t('filters')} <span className="text-[var(--muted)]">· {t('global')}</span></h2><button type="button" onClick={() => updateState((current) => ({ ...current, filters: { brightness: 100, contrast: 100, saturation: 100 } }))} disabled={state.filters.brightness === 100 && state.filters.contrast === 100 && state.filters.saturation === 100} className="rounded px-2 py-1 text-[10px] text-indigo-500 hover:bg-indigo-500/10 disabled:opacity-30">{t('reset')}</button></div>
+                  <div className="mb-3 flex items-center justify-between gap-2"><h2 id="filters-heading" className="text-sm font-semibold">{t('filters')} <span className="text-[var(--muted)]">· {t('global')}</span></h2><button type="button" onClick={() => updateState((current) => ({ ...current, filters: { brightness: 100, contrast: 100, saturation: 100 } }))} disabled={state.filters.brightness === 100 && state.filters.contrast === 100 && state.filters.saturation === 100} className="rounded px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10 disabled:opacity-30">{t('reset')}</button></div>
                   <div className="space-y-4">
                     <RangeControl label={t('brightness')} value={state.filters.brightness} min={0} max={200} onChange={(value) => updateFilter('brightness', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <RangeControl label={t('contrast')} value={state.filters.contrast} min={0} max={200} onChange={(value) => updateFilter('contrast', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
@@ -1926,14 +1959,14 @@ export default function Editor() {
                 </section>
                 {/* Transitions */}
                 <section aria-labelledby="transitions-heading">
-                  <h2 id="transitions-heading" className="mb-3 text-xs font-medium">{t('transitions')}</h2>
+                  <h2 id="transitions-heading" className="mb-3 text-sm font-semibold">{t('transitions')}</h2>
                   {state.clips.length > 1 ? (
                     <div className="space-y-2">
                       {state.clips.slice(0, -1).map((clip, idx) => {
                         const existing = state.transitions.find((tr) => tr.afterClipId === clip.id);
                         return (
                           <div key={clip.id} className="rounded border border-[var(--border)] bg-[var(--raised)] p-2">
-                            <div className="flex items-center justify-between text-[10px] text-[var(--muted)] mb-1">
+                            <div className="flex items-center justify-between text-xs text-[var(--muted)] mb-1">
                               <span>{clip.displayName} → {state.clips[idx + 1]?.displayName}</span>
                             </div>
                             <div className="flex items-center gap-2">
@@ -1941,14 +1974,14 @@ export default function Editor() {
                                 const val = e.target.value;
                                 if (!val) removeTransition(clip.id);
                                 else addTransition(clip.id, val as TransitionConfig['type'], existing?.duration ?? 0.5);
-                              }} className="flex-1 rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-1 text-[11px]">
+                              }} className="flex-1 rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-1 text-xs">
                                 <option value="">{t('no_transition')}</option>
                                 {(['fade', 'dissolve', 'wipeleft', 'wiperight', 'wipeup', 'wipedown', 'slideright', 'slideleft'] as const).map((type) => (
                                   <option key={type} value={type}>{t(`transition_${type}`)}</option>
                                 ))}
                               </select>
                               {existing && (
-                                <input type="number" min={0.2} max={3} step={0.1} value={existing.duration} onChange={(e) => addTransition(clip.id, existing.type, Number(e.target.value) || 0.5)} className="w-14 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('transition_duration')} />
+                                <input type="number" min={0.2} max={3} step={0.1} value={existing.duration} onChange={(e) => addTransition(clip.id, existing.type, Number(e.target.value) || 0.5)} className="w-14 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" aria-label={t('transition_duration')} />
                               )}
                             </div>
                           </div>
@@ -1956,43 +1989,43 @@ export default function Editor() {
                       })}
                     </div>
                   ) : (
-                    <p className="text-[10px] text-[var(--muted)]">{t('no_transition')}</p>
+                    <p className="text-xs text-[var(--muted)]">{t('no_transition')}</p>
                   )}
                 </section>
                 {/* Text Overlays */}
                 <section aria-labelledby="text-heading">
                   <div className="mb-3 flex items-center justify-between">
-                    <h2 id="text-heading" className="text-xs font-medium">{t('text_overlays')}</h2>
-                    <button onClick={addTextOverlay} className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-indigo-500 hover:bg-indigo-500/10"><Plus className="h-3 w-3" />{t('add_text')}</button>
+                    <h2 id="text-heading" className="text-sm font-semibold">{t('text_overlays')}</h2>
+                    <button onClick={addTextOverlay} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10"><Plus className="h-3 w-3" />{t('add_text')}</button>
                   </div>
                   <div className="space-y-2">
                     {state.textOverlays.map((overlay) => (
                       <div key={overlay.id} className={`rounded border p-2 ${editingTextId === overlay.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
                         <div className="flex items-center justify-between mb-1">
-                          <button onClick={() => setEditingTextId(editingTextId === overlay.id ? null : overlay.id)} className="text-[11px] text-indigo-500 hover:underline truncate flex-1 text-left">{overlay.text || t('text_content')}</button>
+                          <button onClick={() => setEditingTextId(editingTextId === overlay.id ? null : overlay.id)} className="text-xs text-indigo-500 hover:underline truncate flex-1 text-left">{overlay.text || t('text_content')}</button>
                           <button onClick={() => removeTextOverlay(overlay.id)} className="text-red-500 hover:text-red-400" aria-label={t('remove_text')}><Trash2 className="h-3 w-3" /></button>
                         </div>
                         {editingTextId === overlay.id && (
                           <div className="mt-2 space-y-2">
-                            <input value={overlay.text} onChange={(e) => updateTextOverlay(overlay.id, { text: e.target.value })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-2 py-1 text-[11px]" placeholder={t('text_content')} />
+                            <input value={overlay.text} onChange={(e) => updateTextOverlay(overlay.id, { text: e.target.value })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-2 py-1 text-xs" placeholder={t('text_content')} />
                             <div className="grid grid-cols-2 gap-2">
-                              <select value={overlay.fontFamily} onChange={(e) => updateTextOverlay(overlay.id, { fontFamily: e.target.value as 'sans' | 'serif' | 'mono' })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px]">
+                              <select value={overlay.fontFamily} onChange={(e) => updateTextOverlay(overlay.id, { fontFamily: e.target.value as 'sans' | 'serif' | 'mono' })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs">
                                 <option value="sans">{t('font_sans')}</option>
                                 <option value="serif">{t('font_serif')}</option>
                                 <option value="mono">{t('font_mono')}</option>
                               </select>
-                              <input type="number" min={12} max={200} value={overlay.fontSize} onChange={(e) => updateTextOverlay(overlay.id, { fontSize: clampNumber(e.target.value, 12, 200, 48) })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('font_size')} />
+                              <input type="number" min={12} max={200} value={overlay.fontSize} onChange={(e) => updateTextOverlay(overlay.id, { fontSize: clampNumber(e.target.value, 12, 200, 48) })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" aria-label={t('font_size')} />
                             </div>
                             <div className="grid grid-cols-2 gap-2">
-                              <input type="color" value={overlay.color} onChange={(e) => updateTextOverlay(overlay.id, { color: e.target.value })} className="h-7 w-full rounded border border-[var(--border)]" aria-label={t('text_color')} />
+                              <input type="color" value={overlay.color} onChange={(e) => updateTextOverlay(overlay.id, { color: e.target.value })} className="h-9 w-full rounded border border-[var(--border)]" aria-label={t('text_color')} />
                               <div className="flex gap-1">
-                                <input type="number" min={0} max={100} value={overlay.position.x} onChange={(e) => updateTextOverlay(overlay.id, { position: { ...overlay.position, x: clampNumber(e.target.value, 0, 100, overlay.position.x) } })} className="w-1/2 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_x')} />
-                                <input type="number" min={0} max={100} value={overlay.position.y} onChange={(e) => updateTextOverlay(overlay.id, { position: { ...overlay.position, y: clampNumber(e.target.value, 0, 100, overlay.position.y) } })} className="w-1/2 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_y')} />
+                                <input type="number" min={0} max={100} value={overlay.position.x} onChange={(e) => updateTextOverlay(overlay.id, { position: { ...overlay.position, x: clampNumber(e.target.value, 0, 100, overlay.position.x) } })} className="w-1/2 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" aria-label={t('text_x')} />
+                                <input type="number" min={0} max={100} value={overlay.position.y} onChange={(e) => updateTextOverlay(overlay.id, { position: { ...overlay.position, y: clampNumber(e.target.value, 0, 100, overlay.position.y) } })} className="w-1/2 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" aria-label={t('text_y')} />
                               </div>
                             </div>
                             <div className="grid grid-cols-2 gap-2">
-                              <input type="number" min={0} step={0.1} value={overlay.startTime} onChange={(e) => updateTextOverlay(overlay.id, { startTime: Number(e.target.value) || 0 })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_start')} />
-                              <input type="number" min={0} step={0.1} value={overlay.endTime} onChange={(e) => updateTextOverlay(overlay.id, { endTime: Number(e.target.value) || 5 })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_end')} />
+                              <input type="number" min={0} step={0.1} value={overlay.startTime} onChange={(e) => updateTextOverlay(overlay.id, { startTime: Number(e.target.value) || 0 })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" aria-label={t('text_start')} />
+                              <input type="number" min={0} step={0.1} value={overlay.endTime} onChange={(e) => updateTextOverlay(overlay.id, { endTime: Number(e.target.value) || 5 })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" aria-label={t('text_end')} />
                             </div>
                           </div>
                         )}
@@ -2008,46 +2041,46 @@ export default function Editor() {
               <>
                 {/* Overlay tool bar */}
                 <section aria-labelledby="overlay-tools-heading">
-                  <h2 id="overlay-tools-heading" className="mb-2 text-xs font-medium">{t('visual_overlays')}</h2>
-                  <div className="flex gap-1 mb-3">
-                    <button onClick={() => setOverlayTool('select')} className={`rounded border px-2 py-1 text-[10px] ${overlayTool === 'select' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{t('overlay_select')}</button>
-                    <button onClick={() => setOverlayTool('pen')} className={`rounded border px-2 py-1 text-[10px] ${overlayTool === 'pen' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{t('overlay_pen')}</button>
-                    <button onClick={() => setOverlayTool('rect')} className={`rounded border px-2 py-1 text-[10px] ${overlayTool === 'rect' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{t('overlay_rect_tool')}</button>
-                    <button onClick={() => imageInputRef.current?.click()} className="rounded border border-[var(--border)] px-2 py-1 text-[10px] text-[var(--muted)] hover:border-indigo-500 hover:text-indigo-500">{t('add_image')}</button>
+                  <h2 id="overlay-tools-heading" className="mb-2 text-sm font-semibold">{t('visual_overlays')}</h2>
+                  <div role="toolbar" aria-label={t('visual_overlays')} className="mb-3 flex flex-wrap gap-2">
+                    <button type="button" aria-pressed={overlayTool === 'select'} disabled={!activeClip} onClick={() => setOverlayTool('select')} className={`min-h-9 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${overlayTool === 'select' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)] hover:border-indigo-400 hover:text-[var(--text)]'} disabled:opacity-40`}>{t('overlay_select')}</button>
+                    <button type="button" aria-pressed={overlayTool === 'pen'} disabled={!activeClip} onClick={() => setOverlayTool('pen')} className={`min-h-9 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${overlayTool === 'pen' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)] hover:border-indigo-400 hover:text-[var(--text)]'} disabled:opacity-40`}>{t('overlay_pen')}</button>
+                    <button type="button" aria-pressed={overlayTool === 'rect'} disabled={!activeClip} onClick={() => setOverlayTool('rect')} className={`min-h-9 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${overlayTool === 'rect' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)] hover:border-indigo-400 hover:text-[var(--text)]'} disabled:opacity-40`}>{t('overlay_rect_tool')}</button>
+                    <button type="button" disabled={!activeClip} onClick={() => imageInputRef.current?.click()} className="min-h-9 rounded-md border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--muted)] transition-colors hover:border-indigo-500 hover:text-indigo-500 disabled:opacity-40">{t('add_image')}</button>
                   </div>
                   {/* Overlay list */}
-                  {state.visualOverlays.length === 0 && <p className="text-[10px] text-[var(--muted)] mb-3">{t('no_overlays')}</p>}
+                  {state.visualOverlays.length === 0 && <p className="text-xs text-[var(--muted)] mb-3">{t('no_overlays')}</p>}
                   {state.visualOverlays.map((overlay) => (
                     <div key={overlay.id} className={`mb-2 rounded border p-2 ${selectedOverlayId === overlay.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
                       <div className="flex items-center justify-between mb-1">
-                        <button onClick={() => setSelectedOverlayId(selectedOverlayId === overlay.id ? null : overlay.id)} className="text-[11px] text-indigo-500 hover:underline capitalize">{overlay.type}</button>
+                        <button onClick={() => setSelectedOverlayId(selectedOverlayId === overlay.id ? null : overlay.id)} className="text-xs text-indigo-500 hover:underline capitalize">{overlay.type}</button>
                         <button onClick={() => removeVisualOverlay(overlay.id)} className="text-red-500 hover:text-red-400" aria-label={t('remove_overlay')}><Trash2 className="h-3 w-3" /></button>
                       </div>
                       {selectedOverlayId === overlay.id && (
                         <div className="mt-2 space-y-2">
                           <div className="grid grid-cols-2 gap-2">
-                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_x')}<input type="number" min={0} max={100} step={1} value={Math.round(overlay.position.x)} onChange={(e) => updateVisualOverlay(overlay.id, { position: { ...overlay.position, x: clampNumber(e.target.value, 0, 100, overlay.position.x) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_y')}<input type="number" min={0} max={100} step={1} value={Math.round(overlay.position.y)} onChange={(e) => updateVisualOverlay(overlay.id, { position: { ...overlay.position, y: clampNumber(e.target.value, 0, 100, overlay.position.y) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            <label className="text-xs text-[var(--muted)]">{t('overlay_x')}<input type="number" min={0} max={100} step={1} value={Math.round(overlay.position.x)} onChange={(e) => updateVisualOverlay(overlay.id, { position: { ...overlay.position, x: clampNumber(e.target.value, 0, 100, overlay.position.x) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                            <label className="text-xs text-[var(--muted)]">{t('overlay_y')}<input type="number" min={0} max={100} step={1} value={Math.round(overlay.position.y)} onChange={(e) => updateVisualOverlay(overlay.id, { position: { ...overlay.position, y: clampNumber(e.target.value, 0, 100, overlay.position.y) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                           </div>
                           <div className="grid grid-cols-2 gap-2">
-                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_width')}<input type="number" min={1} max={100} step={1} value={Math.round(overlay.size.w)} onChange={(e) => updateVisualOverlay(overlay.id, { size: { ...overlay.size, w: clampNumber(e.target.value, 1, 100, overlay.size.w) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_height')}<input type="number" min={1} max={100} step={1} value={Math.round(overlay.size.h)} onChange={(e) => updateVisualOverlay(overlay.id, { size: { ...overlay.size, h: clampNumber(e.target.value, 1, 100, overlay.size.h) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            <label className="text-xs text-[var(--muted)]">{t('overlay_width')}<input type="number" min={1} max={100} step={1} value={Math.round(overlay.size.w)} onChange={(e) => updateVisualOverlay(overlay.id, { size: { ...overlay.size, w: clampNumber(e.target.value, 1, 100, overlay.size.w) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                            <label className="text-xs text-[var(--muted)]">{t('overlay_height')}<input type="number" min={1} max={100} step={1} value={Math.round(overlay.size.h)} onChange={(e) => updateVisualOverlay(overlay.id, { size: { ...overlay.size, h: clampNumber(e.target.value, 1, 100, overlay.size.h) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                           </div>
                           <div className="grid grid-cols-2 gap-2">
-                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_rotation')}<input type="number" min={-360} max={360} step={1} value={overlay.rotation} onChange={(e) => updateVisualOverlay(overlay.id, { rotation: clampNumber(e.target.value, -360, 360, 0) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_opacity')}<input type="number" min={0} max={1} step={0.1} value={overlay.opacity} onChange={(e) => updateVisualOverlay(overlay.id, { opacity: clampNumber(e.target.value, 0, 1, overlay.opacity) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            <label className="text-xs text-[var(--muted)]">{t('overlay_rotation')}<input type="number" min={-360} max={360} step={1} value={overlay.rotation} onChange={(e) => updateVisualOverlay(overlay.id, { rotation: clampNumber(e.target.value, -360, 360, 0) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                            <label className="text-xs text-[var(--muted)]">{t('overlay_opacity')}<input type="number" min={0} max={1} step={0.1} value={overlay.opacity} onChange={(e) => updateVisualOverlay(overlay.id, { opacity: clampNumber(e.target.value, 0, 1, overlay.opacity) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                           </div>
                           <div className="grid grid-cols-2 gap-2">
-                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_start')}<input type="number" min={0} max={Math.max(0, overlay.endTime - 0.1)} step={0.1} value={overlay.startTime} onChange={(e) => { const v = Math.max(0, Math.min(overlay.endTime - 0.01, Number(e.target.value) || 0)); updateVisualOverlay(overlay.id, { startTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_end')}<input type="number" min={overlay.startTime + 0.01} step={0.1} value={overlay.endTime} onChange={(e) => { const v = Math.max(overlay.startTime + 0.01, Number(e.target.value) || overlay.startTime + 1); updateVisualOverlay(overlay.id, { endTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            <label className="text-xs text-[var(--muted)]">{t('overlay_start')}<input type="number" min={0} max={Math.max(0, overlay.endTime - 0.1)} step={0.1} value={overlay.startTime} onChange={(e) => { const v = Math.max(0, Math.min(overlay.endTime - 0.01, Number(e.target.value) || 0)); updateVisualOverlay(overlay.id, { startTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                            <label className="text-xs text-[var(--muted)]">{t('overlay_end')}<input type="number" min={overlay.startTime + 0.01} step={0.1} value={overlay.endTime} onChange={(e) => { const v = Math.max(overlay.startTime + 0.01, Number(e.target.value) || overlay.startTime + 1); updateVisualOverlay(overlay.id, { endTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                           </div>
                           {(overlay.type === 'rectangle' || overlay.type === 'drawing') && (
                             <div className="grid grid-cols-2 gap-2">
-                              <label className="text-[10px] text-[var(--muted)]">{t('overlay_stroke')}<input type="color" value={(overlay as DrawingOverlay).strokeColor || '#ff0000'} onChange={(e) => updateVisualOverlay(overlay.id, { strokeColor: e.target.value } as Partial<VisualOverlay>)} className="h-6 w-full rounded border border-[var(--border)]" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('overlay_stroke')}<input type="color" value={(overlay as DrawingOverlay).strokeColor || '#ff0000'} onChange={(e) => updateVisualOverlay(overlay.id, { strokeColor: e.target.value } as Partial<VisualOverlay>)} className="h-9 w-full rounded border border-[var(--border)]" /></label>
                               {overlay.type === 'rectangle' && (
-                                <label className="text-[10px] text-[var(--muted)]">{t('overlay_fill')}<span className="flex gap-0.5"><input type="color" value={(overlay as import('@/lib/visual-overlay-utils').RectangleOverlay).fillColor || '#000000'} onChange={(e) => updateVisualOverlay(overlay.id, { fillColor: e.target.value } as Partial<VisualOverlay>)} className="h-6 flex-1 rounded border border-[var(--border)]" /><button type="button" onClick={() => updateVisualOverlay(overlay.id, { fillColor: '' } as Partial<VisualOverlay>)} className="rounded border border-[var(--border)] px-1 text-[8px] text-[var(--muted)] hover:text-red-500" title={t('clear_fill')}>✕</button></span></label>
+                                <label className="text-xs text-[var(--muted)]">{t('overlay_fill')}<span className="flex gap-0.5"><input type="color" value={(overlay as import('@/lib/visual-overlay-utils').RectangleOverlay).fillColor || '#000000'} onChange={(e) => updateVisualOverlay(overlay.id, { fillColor: e.target.value } as Partial<VisualOverlay>)} className="h-9 flex-1 rounded border border-[var(--border)]" /><button type="button" onClick={() => updateVisualOverlay(overlay.id, { fillColor: '' } as Partial<VisualOverlay>)} className="min-w-9 rounded border border-[var(--border)] px-1 text-xs text-[var(--muted)] hover:text-red-500" title={t('clear_fill')}>✕</button></span></label>
                               )}
-                              <label className="text-[10px] text-[var(--muted)]">{t('overlay_line_width')}<input type="number" min={0} max={20} step={0.5} value={(overlay as DrawingOverlay).strokeWidth ?? 2} onChange={(e) => updateVisualOverlay(overlay.id, { strokeWidth: clampNumber(e.target.value, 0, 20, (overlay as DrawingOverlay).strokeWidth ?? 2) } as Partial<VisualOverlay>)} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('overlay_line_width')}<input type="number" min={0} max={20} step={0.5} value={(overlay as DrawingOverlay).strokeWidth ?? 2} onChange={(e) => updateVisualOverlay(overlay.id, { strokeWidth: clampNumber(e.target.value, 0, 20, (overlay as DrawingOverlay).strokeWidth ?? 2) } as Partial<VisualOverlay>)} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                             </div>
                           )}
                         </div>
@@ -2059,16 +2092,16 @@ export default function Editor() {
                 {/* Subtitles */}
                 <section aria-labelledby="subtitles-heading">
                   <div className="mb-3 flex items-center justify-between">
-                    <h2 id="subtitles-heading" className="text-xs font-medium">{t('subtitles')}</h2>
-                    <button onClick={addSubtitle} className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-indigo-500 hover:bg-indigo-500/10"><Plus className="h-3 w-3" />{t('add_subtitle')}</button>
+                    <h2 id="subtitles-heading" className="text-sm font-semibold">{t('subtitles')}</h2>
+                    <button onClick={addSubtitle} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10"><Plus className="h-3 w-3" />{t('add_subtitle')}</button>
                   </div>
-                  <p className="text-[9px] text-amber-600 dark:text-amber-400 mb-2" role="note">{t('tts_notice')}</p>
-                  {!ttsSupported && <p className="text-[9px] text-red-500 mb-2" role="alert">{t('tts_unsupported')}</p>}
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2" role="note">{t('tts_notice')}</p>
+                  {!ttsSupported && <p className="text-xs text-red-500 mb-2" role="alert">{t('tts_unsupported')}</p>}
                   <div className="space-y-2">
                     {state.subtitles.map((cue) => (
                       <div key={cue.id} className={`rounded border p-2 ${editingSubtitleId === cue.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
                         <div className="flex items-center justify-between mb-1">
-                          <button onClick={() => setEditingSubtitleId(editingSubtitleId === cue.id ? null : cue.id)} className="text-[11px] text-indigo-500 hover:underline truncate flex-1 text-left">{cue.text || t('subtitle_text')}</button>
+                          <button onClick={() => setEditingSubtitleId(editingSubtitleId === cue.id ? null : cue.id)} className="text-xs text-indigo-500 hover:underline truncate flex-1 text-left">{cue.text || t('subtitle_text')}</button>
                           <button onClick={() => removeSubtitle(cue.id)} className="text-red-500 hover:text-red-400" aria-label={t('remove_subtitle')}><Trash2 className="h-3 w-3" /></button>
                         </div>
                         {editingSubtitleId === cue.id && (
@@ -2078,18 +2111,18 @@ export default function Editor() {
                               value={cue.text}
                               onChange={(e) => updateSubtitle(cue.id, { text: e.target.value })}
                               rows={3}
-                              className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-2 py-1 text-[11px] resize-y"
+                              className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-2 py-1 text-xs resize-y"
                               placeholder={t('subtitle_text')}
                             />
                             {/* Font / Size / Align */}
                             <div className="grid grid-cols-3 gap-1.5">
-                              <select value={cue.fontFamily} onChange={(e) => updateSubtitle(cue.id, { fontFamily: e.target.value as 'sans' | 'serif' | 'mono' })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px]" aria-label={t('subtitle_font')}>
+                              <select value={cue.fontFamily} onChange={(e) => updateSubtitle(cue.id, { fontFamily: e.target.value as 'sans' | 'serif' | 'mono' })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs" aria-label={t('subtitle_font')}>
                                 <option value="sans">{t('font_sans')}</option>
                                 <option value="serif">{t('font_serif')}</option>
                                 <option value="mono">{t('font_mono')}</option>
                               </select>
-                              <input type="number" min={12} max={200} value={cue.fontSize} onChange={(e) => updateSubtitle(cue.id, { fontSize: clampNumber(e.target.value, 12, 200, 48) })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('subtitle_size')} />
-                              <select value={cue.align} onChange={(e) => updateSubtitle(cue.id, { align: e.target.value as 'left' | 'center' | 'right' })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px]" aria-label={t('subtitle_align')}>
+                              <input type="number" min={12} max={200} value={cue.fontSize} onChange={(e) => updateSubtitle(cue.id, { fontSize: clampNumber(e.target.value, 12, 200, 48) })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" aria-label={t('subtitle_size')} />
+                              <select value={cue.align} onChange={(e) => updateSubtitle(cue.id, { align: e.target.value as 'left' | 'center' | 'right' })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs" aria-label={t('subtitle_align')}>
                                 <option value="left">{t('align_left')}</option>
                                 <option value="center">{t('align_center')}</option>
                                 <option value="right">{t('align_right')}</option>
@@ -2097,30 +2130,30 @@ export default function Editor() {
                             </div>
                             {/* Color / Bg / lineHeight */}
                             <div className="grid grid-cols-3 gap-2">
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_color')}<input type="color" value={cue.color} onChange={(e) => updateSubtitle(cue.id, { color: e.target.value })} className="h-6 w-full rounded border border-[var(--border)]" /></label>
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_bg')}
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_color')}<input type="color" value={cue.color} onChange={(e) => updateSubtitle(cue.id, { color: e.target.value })} className="h-9 w-full rounded border border-[var(--border)]" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_bg')}
                                 <div className="flex gap-0.5">
-                                  <input type="color" value={cue.backgroundColor || '#000000'} onChange={(e) => updateSubtitle(cue.id, { backgroundColor: e.target.value })} className="h-6 flex-1 rounded border border-[var(--border)]" />
-                                  <button type="button" onClick={() => updateSubtitle(cue.id, { backgroundColor: '' })} className="rounded border border-[var(--border)] px-1 text-[8px] text-[var(--muted)] hover:text-red-500" title={t('clear_bg')}>✕</button>
+                                  <input type="color" value={cue.backgroundColor || '#000000'} onChange={(e) => updateSubtitle(cue.id, { backgroundColor: e.target.value })} className="h-9 flex-1 rounded border border-[var(--border)]" />
+                                  <button type="button" onClick={() => updateSubtitle(cue.id, { backgroundColor: '' })} className="min-w-9 rounded border border-[var(--border)] px-1 text-xs text-[var(--muted)] hover:text-red-500" title={t('clear_bg')}>✕</button>
                                 </div>
                               </label>
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_line_height')}<input type="number" min={0.8} max={3} step={0.1} value={cue.lineHeight} onChange={(e) => updateSubtitle(cue.id, { lineHeight: Math.max(0.8, Math.min(3, Number(e.target.value) || 1.3)) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_line_height')}<input type="number" min={0.8} max={3} step={0.1} value={cue.lineHeight} onChange={(e) => updateSubtitle(cue.id, { lineHeight: Math.max(0.8, Math.min(3, Number(e.target.value) || 1.3)) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                             </div>
                             {/* Position / Width / Rotation */}
                             <div className="grid grid-cols-4 gap-1.5">
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_x')}<input type="number" min={0} max={100} value={cue.position.x} onChange={(e) => updateSubtitle(cue.id, { position: { ...cue.position, x: clampNumber(e.target.value, 0, 100, cue.position.x) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_y')}<input type="number" min={0} max={100} value={cue.position.y} onChange={(e) => updateSubtitle(cue.id, { position: { ...cue.position, y: clampNumber(e.target.value, 0, 100, cue.position.y) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_width')}<input type="number" min={10} max={100} value={cue.width} onChange={(e) => updateSubtitle(cue.id, { width: clampNumber(e.target.value, 10, 100, cue.width) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_rotation')}<input type="number" min={-360} max={360} value={cue.rotation} onChange={(e) => updateSubtitle(cue.id, { rotation: clampNumber(e.target.value, -360, 360, 0) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_x')}<input type="number" min={0} max={100} value={cue.position.x} onChange={(e) => updateSubtitle(cue.id, { position: { ...cue.position, x: clampNumber(e.target.value, 0, 100, cue.position.x) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_y')}<input type="number" min={0} max={100} value={cue.position.y} onChange={(e) => updateSubtitle(cue.id, { position: { ...cue.position, y: clampNumber(e.target.value, 0, 100, cue.position.y) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_width')}<input type="number" min={10} max={100} value={cue.width} onChange={(e) => updateSubtitle(cue.id, { width: clampNumber(e.target.value, 10, 100, cue.width) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_rotation')}<input type="number" min={-360} max={360} value={cue.rotation} onChange={(e) => updateSubtitle(cue.id, { rotation: clampNumber(e.target.value, -360, 360, 0) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                             </div>
                             {/* Start / End time */}
                             <div className="grid grid-cols-2 gap-2">
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_start')}<input type="number" min={0} max={Math.max(0, cue.endTime - 0.1)} step={0.1} value={cue.startTime} onChange={(e) => { const v = Math.max(0, Math.min(cue.endTime - 0.01, Number(e.target.value) || 0)); updateSubtitle(cue.id, { startTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_end')}<input type="number" min={cue.startTime + 0.01} step={0.1} value={cue.endTime} onChange={(e) => { const v = Math.max(cue.startTime + 0.01, Number(e.target.value) || cue.startTime + 1); updateSubtitle(cue.id, { endTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_start')}<input type="number" min={0} max={Math.max(0, cue.endTime - 0.1)} step={0.1} value={cue.startTime} onChange={(e) => { const v = Math.max(0, Math.min(cue.endTime - 0.01, Number(e.target.value) || 0)); updateSubtitle(cue.id, { startTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                              <label className="text-xs text-[var(--muted)]">{t('subtitle_end')}<input type="number" min={cue.startTime + 0.01} step={0.1} value={cue.endTime} onChange={(e) => { const v = Math.max(cue.startTime + 0.01, Number(e.target.value) || cue.startTime + 1); updateSubtitle(cue.id, { endTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                             </div>
                             {/* TTS */}
                             <div className="rounded border border-[var(--border)] p-2 mt-2">
-                              <label className="flex items-center gap-2 text-[10px] mb-2">
+                              <label className="flex items-center gap-2 text-xs mb-2">
                                 <input type="checkbox" checked={cue.tts?.enabled ?? false} disabled={!ttsSupported} onChange={(e) => {
                                   const enabled = e.target.checked;
                                   if (enabled && !cue.tts) {
@@ -2136,19 +2169,19 @@ export default function Editor() {
                                   <select value={cue.tts.voiceURI} onChange={(e) => {
                                     const voice = ttsVoices.find((v) => v.voiceURI === e.target.value);
                                     updateSubtitle(cue.id, { tts: { ...cue.tts!, voiceURI: e.target.value, lang: voice?.lang ?? cue.tts!.lang } });
-                                  }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px]" aria-label={t('tts_voice')}>
+                                  }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs" aria-label={t('tts_voice')}>
                                     <option value="">{t('tts_voice')}</option>
                                     {ttsVoices.map((v) => <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>)}
                                   </select>
-                                  {ttsVoices.length === 0 && <p className="text-[9px] text-[var(--muted)]">{t('tts_no_voices')}</p>}
+                                  {ttsVoices.length === 0 && <p className="text-xs text-[var(--muted)]">{t('tts_no_voices')}</p>}
                                   <div className="grid grid-cols-3 gap-1.5">
-                                    <label className="text-[10px] text-[var(--muted)]">{t('tts_rate')}<input type="number" min={0.5} max={2} step={0.1} value={cue.tts.rate} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, rate: clampNumber(e.target.value, 0.5, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                                    <label className="text-[10px] text-[var(--muted)]">{t('tts_pitch')}<input type="number" min={0} max={2} step={0.1} value={cue.tts.pitch} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, pitch: clampNumber(e.target.value, 0, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
-                                    <label className="text-[10px] text-[var(--muted)]">{t('tts_volume')}<input type="number" min={0} max={1} step={0.1} value={cue.tts.volume} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, volume: clampNumber(e.target.value, 0, 1, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                                    <label className="text-xs text-[var(--muted)]">{t('tts_rate')}<input type="number" min={0.5} max={2} step={0.1} value={cue.tts.rate} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, rate: clampNumber(e.target.value, 0.5, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                                    <label className="text-xs text-[var(--muted)]">{t('tts_pitch')}<input type="number" min={0} max={2} step={0.1} value={cue.tts.pitch} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, pitch: clampNumber(e.target.value, 0, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
+                                    <label className="text-xs text-[var(--muted)]">{t('tts_volume')}<input type="number" min={0} max={1} step={0.1} value={cue.tts.volume} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, volume: clampNumber(e.target.value, 0, 1, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                                   </div>
                                   <div className="flex gap-2">
-                                    <button onClick={() => previewTts(cue)} disabled={ttsPlaying} className="rounded bg-indigo-600 px-2 py-1 text-[10px] text-white hover:bg-indigo-500 disabled:opacity-40">{t('tts_preview')}</button>
-                                    <button onClick={stopTts} disabled={!ttsPlaying} className="rounded border border-[var(--border)] px-2 py-1 text-[10px] hover:bg-[var(--raised)] disabled:opacity-40">{t('tts_stop')}</button>
+                                    <button onClick={() => previewTts(cue)} disabled={ttsPlaying} className="rounded bg-indigo-600 px-2 py-1 text-xs text-white hover:bg-indigo-500 disabled:opacity-40">{t('tts_preview')}</button>
+                                    <button onClick={stopTts} disabled={!ttsPlaying} className="rounded border border-[var(--border)] px-2 py-1 text-xs hover:bg-[var(--raised)] disabled:opacity-40">{t('tts_stop')}</button>
                                   </div>
                                 </div>
                               )}
@@ -2164,13 +2197,13 @@ export default function Editor() {
           </div>
 
           {/* ─── Sticky Export Button ──────────────────────────────────── */}
-          <div className="shrink-0 border-t border-[var(--border)] bg-[var(--panel)] p-3">
-            <p className="mb-1.5 text-[10px] text-[var(--muted)]">
+          <div className="shrink-0 border-t border-[var(--border)] bg-[var(--panel)] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+            <p className="mb-1.5 text-xs text-[var(--muted)]">
               {state.exportSettings.resolution} · {state.exportSettings.frameRate} fps · {t(`quality_${state.exportSettings.quality}`)}
             </p>
             <button
               ref={exportTriggerRef} type="button" onClick={() => setExportModalOpen(true)} disabled={processing || !state.clips.length}
-              className="flex w-full items-center justify-center gap-2 rounded-md bg-indigo-600 px-3 py-2.5 text-xs font-medium text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex w-full items-center justify-center gap-2 rounded-md bg-indigo-600 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Download className="h-3.5 w-3.5" aria-hidden="true" />
               {t('open_export_settings')}
@@ -2181,7 +2214,7 @@ export default function Editor() {
 
       {/* ─── Timeline ────────────────────────────────────────────────────── */}
       <footer className={`flex shrink-0 flex-col border-t border-[var(--border)] bg-[var(--panel)] transition-all ${timelineCollapsed ? 'h-10' : 'sm:h-48 lg:h-52 h-40'}`}>
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border)] px-3 text-[10px] text-[var(--muted)] sm:px-4">
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border)] px-3 text-xs text-[var(--muted)] sm:px-4">
           <button onClick={() => setTimelineCollapsed(!timelineCollapsed)} className={iconButton} aria-label={timelineCollapsed ? t('expand_timeline') : t('collapse_timeline')}>
             {timelineCollapsed ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           </button>
@@ -2191,7 +2224,7 @@ export default function Editor() {
           {/* Zoom controls */}
           <div className="flex items-center gap-0.5">
             <button onClick={() => setTimelineZoom(Math.max(0.3, timelineZoom - 0.3))} className={iconButton} aria-label={t('zoom_out')} title={t('zoom_out')}><ZoomOut className="h-3.5 w-3.5" /></button>
-            <button onClick={() => setTimelineZoom(1)} className="rounded px-1.5 py-0.5 text-[9px] font-mono hover:bg-[var(--raised)]" aria-label={t('zoom_fit')} title={t('zoom_fit')}>{(timelineZoom * 100).toFixed(0)}%</button>
+            <button onClick={() => setTimelineZoom(1)} className="rounded px-1.5 py-0.5 text-xs font-mono hover:bg-[var(--raised)]" aria-label={t('zoom_fit')} title={t('zoom_fit')}>{(timelineZoom * 100).toFixed(0)}%</button>
             <button onClick={() => setTimelineZoom(Math.min(5, timelineZoom + 0.3))} className={iconButton} aria-label={t('zoom_in')} title={t('zoom_in')}><ZoomIn className="h-3.5 w-3.5" /></button>
           </div>
           <span className="truncate font-mono text-indigo-500">{activeClip ? `${t('active_trim')}: ${activeClip.trimStart.toFixed(1)}s – ${activeClip.trimEnd.toFixed(1)}s` : t('no_clip')}</span>
@@ -2216,7 +2249,7 @@ export default function Editor() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 backdrop-blur-sm sm:p-6" onMouseDown={(event) => { if (event.currentTarget === event.target) closeExportModal(); }}>
           <div ref={exportDialogRef} role="dialog" aria-modal="true" aria-labelledby="export-modal-heading" aria-describedby="export-modal-description" tabIndex={-1} onKeyDown={(e) => trapFocus(e, exportDialogRef)} className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl sm:max-h-[calc(100dvh-3rem)]">
             <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
-              <div><h2 id="export-modal-heading" className="text-sm font-semibold">{t('export_settings')}</h2><p id="export-modal-description" className="mt-0.5 text-[10px] text-[var(--muted)]">{t('export_settings_hint')}</p></div>
+              <div><h2 id="export-modal-heading" className="text-sm font-semibold">{t('export_settings')}</h2><p id="export-modal-description" className="mt-0.5 text-xs text-[var(--muted)]">{t('export_settings_hint')}</p></div>
               <button type="button" onClick={closeExportModal} className={iconButton} aria-label={t('close_export_settings')}><X className="h-4 w-4" /></button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
@@ -2246,7 +2279,7 @@ export default function Editor() {
               <h2 id="help-heading" className="text-sm font-semibold">{t('keyboard_shortcuts')}</h2>
               <button onClick={() => setShowHelpModal(false)} className={iconButton} aria-label={t('close')}><X className="h-4 w-4" /></button>
             </div>
-            <div className="space-y-2 text-[11px]">
+            <div className="space-y-2 text-xs">
               {[
                 ['Space', t('shortcut_play')],
                 ['S', t('shortcut_split')],
@@ -2263,7 +2296,7 @@ export default function Editor() {
                 ['?', t('shortcut_help_key')],
               ].map(([key, desc]) => (
                 <div key={key} className="flex items-center justify-between gap-4">
-                  <kbd className="rounded border border-[var(--border)] bg-[var(--raised)] px-2 py-0.5 font-mono text-[10px]">{key}</kbd>
+                  <kbd className="rounded border border-[var(--border)] bg-[var(--raised)] px-2 py-0.5 font-mono text-xs">{key}</kbd>
                   <span className="text-[var(--muted)]">{desc}</span>
                 </div>
               ))}
@@ -2293,7 +2326,7 @@ export default function Editor() {
                   <div className="flex items-center justify-between gap-2">
                     <button onClick={() => void handleSwitchProject(project.id)} className="flex-1 text-left">
                       <span className="block text-xs font-medium truncate">{project.name}</span>
-                      <span className="block text-[10px] text-[var(--muted)]">{new Date(project.updatedAt).toLocaleString()}</span>
+                      <span className="block text-xs text-[var(--muted)]">{new Date(project.updatedAt).toLocaleString()}</span>
                     </button>
                     <div className="flex items-center gap-0.5">
                       <button onClick={() => { const name = window.prompt(t('project_name'), project.name); if (name) void handleRenameProject(project.id, name); }} className={iconButton} aria-label={t('rename_project')} title={t('rename_project')}><Edit2 className="h-3.5 w-3.5" /></button>

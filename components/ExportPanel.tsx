@@ -55,6 +55,7 @@ export default function ExportPanel({
   const sliderEvents = {
     onPointerDown: onEditStart,
     onPointerUp: onEditEnd,
+    onPointerCancel: onEditEnd,
     onKeyDown: onEditStart,
     onKeyUp: onEditEnd,
     onBlur: onEditEnd,
@@ -67,46 +68,46 @@ export default function ExportPanel({
           type="button"
           onClick={() => onChange({ ...settings, rangeStart: 0, rangeEnd: null })}
           disabled={disabled}
-          className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-indigo-500 hover:bg-indigo-500/10 disabled:opacity-40"
+          className="flex items-center gap-1 rounded px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10 disabled:opacity-40"
         >
           <RotateCcw className="h-3 w-3" />{t('full_project')}
         </button>
       </div>
 
       <div className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--raised)] p-3">
-        <div className="flex items-center justify-between text-[10px] text-[var(--muted)]">
+        <div className="flex items-center justify-between text-xs text-[var(--muted)]">
           <span>{t('export_range')}</span>
           <output className="font-mono text-[var(--text)]">{formatTime(rangeStart)} – {formatTime(rangeEnd)}</output>
         </div>
-        <div className="block text-[10px] text-[var(--muted)]">
+        <div className="block text-xs text-[var(--muted)]">
           <span className="mb-1 flex items-center justify-between gap-3">
             <label htmlFor="export-range-start">{t('range_start')}</label>
-            <span className="flex items-center gap-1"><input aria-label={`${t('range_start')} (s)`} type="number" min={0} max={Math.max(0, rangeEnd - 0.1)} step={0.1} value={Number(rangeStart.toFixed(1))} disabled={disabled || projectDuration <= 0} onFocus={onEditStart} onBlur={onEditEnd} onChange={(event) => { if (Number.isFinite(event.currentTarget.valueAsNumber)) updateRange('rangeStart', event.currentTarget.valueAsNumber); }} className="w-20 rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-1 text-right font-mono text-[11px] text-[var(--text)] disabled:opacity-40" />s</span>
+            <span className="flex items-center gap-1"><input aria-label={`${t('range_start')} (s)`} type="number" min={0} max={Math.max(0, rangeEnd - 0.1)} step={0.1} value={Number(rangeStart.toFixed(1))} disabled={disabled || projectDuration <= 0} onFocus={onEditStart} onBlur={onEditEnd} onChange={(event) => { if (Number.isFinite(event.currentTarget.valueAsNumber)) updateRange('rangeStart', event.currentTarget.valueAsNumber); }} className="w-20 rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-1 text-right font-mono text-xs text-[var(--text)] disabled:opacity-40" />s</span>
           </span>
           <input
             id="export-range-start" type="range" min={0} max={Math.max(0, rangeEnd - 0.1)} step={0.1} value={rangeStart}
             disabled={disabled || projectDuration <= 0} onChange={(event) => updateRange('rangeStart', Number(event.target.value))}
             {...sliderEvents}
-            className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-[var(--border)] accent-indigo-600 disabled:opacity-40"
+            className="h-5 w-full touch-pan-y cursor-pointer appearance-none rounded-full accent-indigo-600 disabled:opacity-40"
           />
         </div>
-        <div className="block text-[10px] text-[var(--muted)]">
+        <div className="block text-xs text-[var(--muted)]">
           <span className="mb-1 flex items-center justify-between gap-3">
             <label htmlFor="export-range-end">{t('range_end')}</label>
-            <span className="flex items-center gap-1"><input aria-label={`${t('range_end')} (s)`} type="number" min={Math.min(projectDuration, rangeStart + 0.1)} max={projectDuration} step={0.1} value={Number(rangeEnd.toFixed(1))} disabled={disabled || projectDuration <= 0} onFocus={onEditStart} onBlur={onEditEnd} onChange={(event) => { if (Number.isFinite(event.currentTarget.valueAsNumber)) updateRange('rangeEnd', event.currentTarget.valueAsNumber); }} className="w-20 rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-1 text-right font-mono text-[11px] text-[var(--text)] disabled:opacity-40" />s</span>
+            <span className="flex items-center gap-1"><input aria-label={`${t('range_end')} (s)`} type="number" min={Math.min(projectDuration, rangeStart + 0.1)} max={projectDuration} step={0.1} value={Number(rangeEnd.toFixed(1))} disabled={disabled || projectDuration <= 0} onFocus={onEditStart} onBlur={onEditEnd} onChange={(event) => { if (Number.isFinite(event.currentTarget.valueAsNumber)) updateRange('rangeEnd', event.currentTarget.valueAsNumber); }} className="w-20 rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-1 text-right font-mono text-xs text-[var(--text)] disabled:opacity-40" />s</span>
           </span>
           <input
             id="export-range-end" type="range" min={Math.min(projectDuration, rangeStart + 0.1)} max={projectDuration} step={0.1} value={rangeEnd}
             disabled={disabled || projectDuration <= 0} onChange={(event) => updateRange('rangeEnd', Number(event.target.value))}
             {...sliderEvents}
-            className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-[var(--border)] accent-indigo-600 disabled:opacity-40"
+            className="h-5 w-full touch-pan-y cursor-pointer appearance-none rounded-full accent-indigo-600 disabled:opacity-40"
           />
         </div>
-        <p className="text-[10px] text-[var(--muted)]">{t('selected_duration', { value: rangeDuration.toFixed(1) })}</p>
+        <p className="text-xs text-[var(--muted)]">{t('selected_duration', { value: rangeDuration.toFixed(1) })}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <label className="space-y-1 text-[10px] text-[var(--muted)]">
+        <label className="space-y-1 text-xs text-[var(--muted)]">
           <span>{t('resolution')}</span>
           <select
             value={settings.resolution} disabled={disabled}
@@ -116,7 +117,7 @@ export default function ExportPanel({
             <option value="480p">480p</option><option value="720p">720p</option><option value="1080p">1080p</option>
           </select>
         </label>
-        <label className="space-y-1 text-[10px] text-[var(--muted)]">
+        <label className="space-y-1 text-xs text-[var(--muted)]">
           <span>{t('frame_rate')}</span>
           <select
             value={settings.frameRate} disabled={disabled}
@@ -128,7 +129,7 @@ export default function ExportPanel({
         </label>
       </div>
 
-      <label className="block space-y-1 text-[10px] text-[var(--muted)]">
+      <label className="block space-y-1 text-xs text-[var(--muted)]">
         <span>{t('quality')}</span>
         <select
           value={settings.quality} disabled={disabled}
@@ -141,15 +142,15 @@ export default function ExportPanel({
         </select>
       </label>
 
-      <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3 text-[10px] text-[var(--muted)]">
+      <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3 text-xs text-[var(--muted)]">
         <div className="flex justify-between"><span>{t('video_bitrate')}</span><strong className="text-[var(--text)]">{(profile.videoBitrateKbps / 1000).toFixed(1)} Mbps</strong></div>
         <div className="mt-1 flex justify-between"><span>{t('estimated_size')}</span><strong className="text-[var(--text)]">≈ {estimatedSize < 1 ? estimatedSize.toFixed(2) : estimatedSize.toFixed(1)} MB</strong></div>
         <p className="mt-1.5 leading-4">{t('size_disclaimer')}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <button type="button" onClick={() => onExport('mp4')} disabled={disabled || rangeDuration <= 0} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_mp4')}</button>
-        <button type="button" onClick={() => onExport('webm')} disabled={disabled || rangeDuration <= 0} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-xs transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_webm')}</button>
+        <button type="button" onClick={() => onExport('mp4')} disabled={disabled || rangeDuration <= 0} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-sm font-medium transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_mp4')}</button>
+        <button type="button" onClick={() => onExport('webm')} disabled={disabled || rangeDuration <= 0} className="flex items-center justify-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--raised)] p-2.5 text-sm font-medium transition hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"><Download className="h-3.5 w-3.5" />{t('export_webm')}</button>
       </div>
     </section>
   );
