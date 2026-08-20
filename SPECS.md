@@ -60,7 +60,7 @@ Cutfish is a privacy-first browser video editor. Source files, drafts, and rende
 - Visual overlays (drawing, rectangle, image): pen tool draws freehand, rectangle tool drag-draws, image via file picker; coordinates in overlay-local 0..1 after `rebaseDrawingPoints`; live preview via SVG/CSS with real-time pen/rect draft; end > start clamped
 - Visual overlay export: intersecting items selected via `selectAndShiftOverlaysForExport`, rendered to transparent PNGs, composited via FFmpeg `overlay=0:0:shortest=1:eof_action=pass:enable='between(t,...)'`
 - Drawing mode: touch-action:none, pointercancel/lostpointercapture handled to prevent stuck state
-- Browser TTS: per-subtitle enable with voice/language selection, rate/pitch/volume; auto-plays on playback entering cue (skips empty text), cancels on leaving cue/pause/project switch/unmount; detection guards speechSynthesis + SpeechSynthesisUtterance availability, shows bilingual unsupported notice and disables checkbox if missing; TTS is explicitly local browser preview only—it does NOT enter the export audio track
+- Exportable local TTS: each subtitle can select a Piper/VITS export voice, enable/disable export mixing, set rate and volume, preview the exact generated WAV, and burn speech into the final audio track at cue project time; browser speechSynthesis remains an instant fallback for timeline auto-preview; TTS enable is not gated on speechSynthesis availability (local VITS always available); models (20–65 MB) downloaded from external CDN on first use, cached in OPFS, all inference local; in-memory Map cache keyed by voice+text+rate for preview/export reuse; Audio instance and URL cleaned on stop/teardown; export generates WAVs before FFmpeg, writes to MEMFS, passes TtsAudioInput array; cancel checks between each cue; export failure is not silent
 - Image overlay File persisted via IndexedDB (structured clone); `url` field is runtime-only (recreated from File on project load via `createTrackedUrl`); deletion does not immediately revoke URL (preserving undo); project switch and teardown revoke all tracked object URLs
 
 ## 3. Component architecture
@@ -77,12 +77,16 @@ lib/ffmpeg-utils.ts        pure validated FFmpeg argument generation (basic + ex
 lib/transition-utils.ts    pure xfade/acrossfade filter chain builder
 lib/text-overlay-utils.ts  drawtext filter builder + PNG overlay fallback strategy
 lib/visual-overlay-utils.ts  SubtitleCue/VisualOverlay types, factories, selectAndShiftOverlaysForExport, rebaseDrawingPoints, time/drawing/FFmpeg utils
+lib/tts-utils.ts           curated Piper voices, backward-compatible TTS defaults, export cue selection/time mapping, synthesis cache keys
+lib/local-tts.ts           browser-only VITS synthesis wrapper (dynamic import, OPFS model cache, progress callback)
+lib/empty-module.js        empty stub used by Turbopack/webpack resolver to satisfy Node-only fs/path imports from onnxruntime
 lib/overlay-renderer.ts    browser-side transparent PNG renderer (OffscreenCanvas) for subtitles + visual overlays with DejaVu font loading
 lib/preset-utils.ts        preset definitions and applicator
 lib/draft-store.ts         multi-project IndexedDB CRUD with v1→v2 migration, clip defaults, state defaults
 lib/i18n.ts                English and Chinese resources (complete coverage of all UI strings)
 IndexedDB                  multi-project draft state and source File objects (incl. image overlay Files)
-FFmpeg.wasm MEMFS          temporary inputs, overlay PNGs, and rendered output
+Origin Private File System  downloaded Piper voice models (20–65 MB each), cached by vits-web
+FFmpeg.wasm MEMFS          temporary inputs, overlay PNGs, generated TTS WAVs, and rendered output
 ```
 
 ## 4. State and data flow
@@ -276,12 +280,12 @@ Help modal (`?` key) provides a keyboard shortcuts reference with focus trap. Pr
 | ? | Show shortcuts help |
 | Escape | Close active modal/panel |
 
-## 10. Subtitles, visual overlays, and TTS preview
+## 10. Subtitles, visual overlays, and exportable TTS
 
 ### 10.1 Data models
 
 ```ts
-/** A subtitle cue with optional TTS preview config */
+/** A subtitle cue with local preview and exportable TTS config */
 interface SubtitleCue {
   id: string;
   text: string;
@@ -300,8 +304,10 @@ interface SubtitleCue {
     voiceURI: string;
     lang: string;              // BCP 47
     rate: number;              // 0.1–10
-    pitch: number;             // 0–2
-    volume: number;            // 0–1
+    pitch: number;             // 0–2, browser instant-preview only
+    volume: number;            // 0–1, applied to preview and export
+    exportVoiceId: string;     // curated Piper voice ID
+    includeInExport: boolean;  // default true
   } | null;
 }
 
@@ -347,13 +353,15 @@ type VisualOverlay = DrawingOverlay | RectangleOverlay | ImageOverlay;
 
 All `startTime` and `endTime` values on SubtitleCue and VisualOverlay are expressed in **project time** — the elapsed playback position within the ordered, speed-adjusted, trimmed clip sequence starting at zero. When exporting a partial range `[rangeStart, rangeEnd]`, overlay times are shifted by `-rangeStart` so that `t=0` in the exported file corresponds to `rangeStart` in the project.
 
-### 10.3 TTS preview (browser-local only)
+### 10.3 Local TTS preview, models, and privacy
 
-TTS uses the Web `SpeechSynthesis` API for real-time local playback preview. When a subtitle cue with `tts.enabled === true` enters the active time window during playback, the browser speaks the cue text with the configured voice/rate/pitch/volume and cancels at the cue boundary, pause, or project switch. TTS **does not** produce audio in the exported video because browser speech output cannot be captured privately and portably without a server. Export renders subtitles visually as burned-in transparent PNG overlays with wrapping, line height, background, alignment, position, and rotation preserved.
+TTS export uses pinned `@diffusionstudio/vits-web@1.0.3` (MIT) with Piper ONNX voices. The package returns a WAV `Blob` entirely in-browser. The first use of a voice downloads its model (roughly 20–65 MB) from the public Piper voice repository and caches it in the browser Origin Private File System; subsequent generation is local. Static model/runtime requests never contain subtitle text or media. Curated choices include Chinese Huayan fast/quality models and multiple English female/male voices.
 
-### 10.4 Export strategy: transparent PNG overlay inputs
+Manual preview synthesizes and plays the exact selected export voice, reusing an in-memory WAV cache keyed by voice+text+rate. The Audio instance uses `playbackRate` and `volume` matching the cue settings; URL is revoked on stop or component teardown. Timeline auto-preview uses `SpeechSynthesis` when available for immediate low-latency feedback; `speechSynthesis` absence only disables auto-preview, not the TTS enable checkbox (local VITS is always available). Pitch is a system-preview property; export applies the selected VITS voice, rate, and volume. UI exposes model download/generation progress and an explicit include-in-export toggle. The panel displays model size and OPFS caching information plus a notice that subtitle media is never uploaded.
 
-At export time, each subtitle and visual overlay is pre-rendered into a full-canvas-sized transparent PNG (off-screen Canvas). These PNGs are written to FFmpeg MEMFS and added as additional inputs with `-loop 1 -i <filename>`. The filter graph chains sequential `overlay=0:0:enable='between(t,start,end)'` filters after the EQ stage and before final output. Input indices are computed as: video clips (0..N-1), optional background music (N if present), then overlay PNGs (N+1..M or N..M if no bg music). Coordinates and rotation are baked into the PNG at render time so the overlay filter uses `0:0` positioning.
+### 10.4 Export strategy: visual PNGs and generated TTS WAV inputs
+
+At export time, each subtitle and visual overlay is pre-rendered into a full-canvas-sized transparent PNG (off-screen Canvas). Each enabled export-TTS cue intersecting the selected range is synthesized to WAV before FFmpeg execution, reusing the in-memory cache when available; progress is reported per-cue with a distinct 'tts' processing stage. PNGs and WAVs are written to MEMFS. Input order is deterministic: selected video clips, optional background music, overlay PNGs, then TTS WAVs. Each TTS stream is trimmed for a partial-range overlap, normalized to stereo/48 kHz, rate-adjusted with `atempo`, volume-adjusted, limited to the visible cue duration, delayed to its range-relative start, and mixed with the project/background audio using `amix=duration=first`. Generation failures fail the entire export instead of silently dropping speech. Cancellation is checked between each TTS cue generation. All temporary WAVs (named `tts-N.wav`) are pushed to `temporaryFiles` and deleted after success or failure.
 
 ### 10.5 DraftState persistence
 
@@ -370,7 +378,7 @@ npm run typecheck
 npm run build
 ```
 
-## 10. UI typography and interaction system
+## 12. UI typography and interaction system
 
 Cutfish uses a compact but readable three-level interface type scale instead of arbitrary pixel sizes:
 

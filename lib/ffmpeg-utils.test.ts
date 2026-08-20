@@ -14,6 +14,7 @@ import {
   type TextOverlay,
   type BgMusicExport,
   type PngOverlayInput,
+  type TtsAudioInput,
 } from './ffmpeg-utils';
 
 const filters = { brightness: 110, contrast: 95, saturation: 120 };
@@ -491,5 +492,142 @@ describe('buildFFmpegCommandExtended with overlayPngs', () => {
     const mapIdx = args.indexOf('-map');
     expect(args[mapIdx + 1]).toBe('[filteredv]');
     expect(args[mapIdx + 3]).toBe('[finala]');
+  });
+});
+
+describe('buildFFmpegCommandExtended with ttsAudioInputs', () => {
+  const extClips: ExtendedClipMetadata[] = [
+    { id: 'a', filename: 'a.mp4', trimStart: 0, trimEnd: 5, hasAudio: true, volume: 100, muted: false, rotation: 0, flipH: false, flipV: false, speed: 1.0 },
+    { id: 'b', filename: 'b.mp4', trimStart: 0, trimEnd: 5, hasAudio: true, volume: 100, muted: false, rotation: 0, flipH: false, flipV: false, speed: 1.0 },
+  ];
+
+  const ttsInputs: TtsAudioInput[] = [
+    { filename: 'tts_0.wav', startTime: 1, endTime: 4, sourceTrimStart: 0, rate: 1.0, volume: 0.8 },
+    { filename: 'tts_1.wav', startTime: 5, endTime: 8, sourceTrimStart: 0.5, rate: 1.5, volume: 1.0 },
+  ];
+
+  it('adds -i for each TTS WAV input', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, [], ttsInputs);
+    const argStr = args.join(' ');
+    expect(argStr).toContain('-i tts_0.wav');
+    expect(argStr).toContain('-i tts_1.wav');
+  });
+
+  it('computes correct input indices for TTS (no bgMusic, no PNGs)', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, [], ttsInputs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // 2 clips, no bg, no PNGs → TTS starts at index 2
+    expect(graph).toContain('[2:a]atrim=start=0');
+    expect(graph).toContain('[3:a]atrim=start=0.5');
+  });
+
+  it('computes correct input indices for TTS (with bgMusic, no PNGs)', () => {
+    const bgMusic: BgMusicExport = { filename: 'bg.mp3', volume: 100, loop: false, fadeIn: 0, fadeOut: 0 };
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], bgMusic, undefined, [], ttsInputs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // 2 clips + 1 bg → TTS starts at index 3
+    expect(graph).toContain('[3:a]atrim=start=0');
+    expect(graph).toContain('[4:a]atrim=start=0.5');
+  });
+
+  it('computes correct input indices for TTS (with bgMusic and PNGs)', () => {
+    const bgMusic: BgMusicExport = { filename: 'bg.mp3', volume: 100, loop: false, fadeIn: 0, fadeOut: 0 };
+    const pngs: PngOverlayInput[] = [
+      { filename: 'sub.png', startTime: 0, endTime: 5 },
+    ];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], bgMusic, undefined, pngs, ttsInputs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // 2 clips + 1 bg + 1 PNG → TTS starts at index 4
+    expect(graph).toContain('[4:a]atrim=start=0');
+    expect(graph).toContain('[5:a]atrim=start=0.5');
+  });
+
+  it('builds correct atrim/asetpts/aresample/aformat chain', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, [], ttsInputs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // First TTS: sourceTrimStart=0, rate=1.0, volume=0.8, duration=3, delay=1000ms
+    expect(graph).toContain('[2:a]atrim=start=0,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.8,atrim=duration=3,adelay=delays=1000:all=1[tts0]');
+    // Second TTS: sourceTrimStart=0.5, rate=1.5, volume=1, duration=3, delay=5000ms
+    expect(graph).toContain('[3:a]atrim=start=0.5,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atempo=1.5,volume=1,atrim=duration=3,adelay=delays=5000:all=1[tts1]');
+  });
+
+  it('applies atempo chain for rate != 1.0', () => {
+    const singleTts: TtsAudioInput[] = [
+      { filename: 'tts.wav', startTime: 0, endTime: 5, sourceTrimStart: 0, rate: 2.0, volume: 1 },
+    ];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, [], singleTts);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('atempo=2');
+  });
+
+  it('omits adelay when startTime is 0', () => {
+    const singleTts: TtsAudioInput[] = [
+      { filename: 'tts.wav', startTime: 0, endTime: 3, sourceTrimStart: 0, rate: 1, volume: 1 },
+    ];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, [], singleTts);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('atrim=duration=3[tts0]');
+    expect(graph).not.toContain('adelay=delays=0');
+  });
+
+  it('mixes TTS with synced audio using amix duration=first', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, [], ttsInputs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // 2 TTS streams + 1 synced audio = amix=inputs=3
+    expect(graph).toContain('[synceda][tts0][tts1]amix=inputs=3:duration=first[finala]');
+  });
+
+  it('mixes TTS with bgMusic-mixed audio using amix', () => {
+    const bgMusic: BgMusicExport = { filename: 'bg.mp3', volume: 100, loop: false, fadeIn: 0, fadeOut: 0 };
+    const singleTts: TtsAudioInput[] = [
+      { filename: 'tts.wav', startTime: 2, endTime: 5, sourceTrimStart: 0, rate: 1, volume: 0.9 },
+    ];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], bgMusic, undefined, [], singleTts);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // bg audio produces [bgmixed], then TTS mixes with it
+    expect(graph).toContain('[bgmixed][tts0]amix=inputs=2:duration=first[finala]');
+  });
+
+  it('final map is [finala] when TTS inputs present', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, [], ttsInputs);
+    const mapIdx = args.indexOf('-map');
+    expect(args[mapIdx + 3]).toBe('[finala]');
+  });
+
+  it('does not break when ttsAudioInputs is empty (default)', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, []);
+    expect(args).toContain('output.mp4');
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).not.toContain('[tts0]');
+  });
+
+  it('backward compatible: no TTS, no bgMusic, maps [synceda]', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null);
+    const mapIdx = args.indexOf('-map');
+    expect(args[mapIdx + 3]).toBe('[synceda]');
+  });
+
+  it('handles partial range trim via sourceTrimStart', () => {
+    const singleTts: TtsAudioInput[] = [
+      { filename: 'tts.wav', startTime: 0, endTime: 3, sourceTrimStart: 2.5, rate: 1, volume: 1 },
+    ];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, [], singleTts);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('[2:a]atrim=start=2.5,asetpts=PTS-STARTPTS');
+  });
+
+  it('input order is clips → bgMusic → PNGs → TTS WAVs', () => {
+    const bgMusic: BgMusicExport = { filename: 'bg.mp3', volume: 100, loop: false, fadeIn: 0, fadeOut: 0 };
+    const pngs: PngOverlayInput[] = [{ filename: 'sub.png', startTime: 0, endTime: 5 }];
+    const singleTts: TtsAudioInput[] = [{ filename: 'tts.wav', startTime: 1, endTime: 3, sourceTrimStart: 0, rate: 1, volume: 1 }];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], bgMusic, undefined, pngs, singleTts);
+
+    // Find input positions
+    const inputs: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-i') inputs.push(args[i + 1]);
+    }
+    // clips: a.mp4, b.mp4; bg: bg.mp3; PNG: sub.png; TTS: tts.wav
+    expect(inputs).toEqual(['a.mp4', 'b.mp4', 'bg.mp3', 'sub.png', 'tts.wav']);
   });
 });

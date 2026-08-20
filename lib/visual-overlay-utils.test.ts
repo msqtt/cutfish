@@ -155,13 +155,13 @@ describe('getActiveTtsCue', () => {
       id: 'c1', text: 'Hello', fontFamily: 'sans', fontSize: 48, lineHeight: 1.3, color: '#fff',
       backgroundColor: '', position: { x: 50, y: 50 }, width: 0, align: 'center',
       rotation: 0, startTime: 1, endTime: 4,
-      tts: { enabled: true, voiceURI: 'v1', lang: 'en', rate: 1, pitch: 1, volume: 1 },
+      tts: { enabled: true, voiceURI: 'v1', lang: 'en', rate: 1, pitch: 1, volume: 1, exportVoiceId: 'en_US-hfc_female-medium', includeInExport: true },
     },
     {
       id: 'c2', text: 'World', fontFamily: 'sans', fontSize: 48, lineHeight: 1.3, color: '#fff',
       backgroundColor: '', position: { x: 50, y: 50 }, width: 0, align: 'center',
       rotation: 0, startTime: 5, endTime: 8,
-      tts: { enabled: true, voiceURI: 'v1', lang: 'en', rate: 1, pitch: 1, volume: 1 },
+      tts: { enabled: true, voiceURI: 'v1', lang: 'en', rate: 1, pitch: 1, volume: 1, exportVoiceId: 'en_US-hfc_female-medium', includeInExport: true },
     },
     {
       id: 'c3', text: 'No TTS', fontFamily: 'sans', fontSize: 48, lineHeight: 1.3, color: '#fff',

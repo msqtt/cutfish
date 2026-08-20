@@ -60,6 +60,15 @@ export interface PngOverlayInput {
   endTime: number;
 }
 
+export interface TtsAudioInput {
+  filename: string;
+  startTime: number;   // export-range-relative start (seconds)
+  endTime: number;     // export-range-relative end (seconds)
+  sourceTrimStart: number; // trim from beginning of source WAV (seconds)
+  rate: number;        // 0.5–2.0
+  volume: number;      // 0–1
+}
+
 export interface AudioFadeSettings {
   fadeIn: number;
   fadeOut: number;
@@ -362,6 +371,7 @@ export function buildFFmpegCommandExtended(
   bgMusic: BgMusicExport | null,
   fontMap: FontMap = DEFAULT_FONT_MAP,
   overlayPngs: PngOverlayInput[] = [],
+  ttsAudioInputs: TtsAudioInput[] = [],
 ): string[] {
   if (clips.length === 0) throw new Error('At least one clip is required');
 
@@ -385,6 +395,11 @@ export function buildFFmpegCommandExtended(
   // Add PNG overlay inputs (after clips and optional bgMusic)
   for (const png of overlayPngs) {
     args.push('-loop', '1', '-i', png.filename);
+  }
+
+  // Add TTS WAV inputs (after PNGs)
+  for (const tts of ttsAudioInputs) {
+    args.push('-i', tts.filename);
   }
 
   let filterComplex = '';
@@ -555,12 +570,69 @@ export function buildFFmpegCommandExtended(
     }
     bgAudioChain += `,volume=${bgVolNorm}[bgaudio]`;
     filterComplex += `${bgAudioChain};`;
-    filterComplex += `[synceda][bgaudio]amix=inputs=2:duration=first[finala]`;
-    finalAudioLabel = '[finala]';
+    filterComplex += `[synceda][bgaudio]amix=inputs=2:duration=first[bgmixed]`;
+    finalAudioLabel = '[bgmixed]';
   } else {
     // Remove trailing semicolon from synceda and use it directly
     filterComplex = filterComplex.replace(/;\s*$/, '');
     finalAudioLabel = '[synceda]';
+  }
+
+  // TTS audio mixing
+  if (ttsAudioInputs.length > 0) {
+    // TTS input index: clips + (bgMusic ? 1 : 0) + overlayPngs.length
+    const ttsBaseIndex = clips.length + (bgMusic ? 1 : 0) + overlayPngs.length;
+
+    // Ensure trailing semicolon before TTS filters
+    if (!filterComplex.endsWith(';')) {
+      filterComplex += ';';
+    }
+
+    const ttsLabels: string[] = [];
+    for (let i = 0; i < ttsAudioInputs.length; i++) {
+      const tts = ttsAudioInputs[i];
+      const inputIdx = ttsBaseIndex + i;
+      const label = `[tts${i}]`;
+      const duration = tts.endTime - tts.startTime;
+      const delayMs = Math.round(tts.startTime * 1000);
+
+      // Build TTS audio filter chain:
+      // atrim source → asetpts → aresample/aformat stereo 48k → atempo chain → volume → atrim duration → adelay
+      let chain = `[${inputIdx}:a]atrim=start=${formatFilterNumber(tts.sourceTrimStart)},asetpts=PTS-STARTPTS`;
+      chain += `,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo`;
+
+      // Rate via atempo chain
+      if (tts.rate !== 1.0) {
+        const atempoChain = buildAtempoChain(tts.rate);
+        if (atempoChain) {
+          chain += `,${atempoChain}`;
+        }
+      }
+
+      // Volume
+      chain += `,volume=${formatFilterNumber(tts.volume)}`;
+
+      // Limit duration to visible cue duration
+      chain += `,atrim=duration=${formatFilterNumber(duration)}`;
+
+      // Delay to start position
+      if (delayMs > 0) {
+        chain += `,adelay=delays=${delayMs}:all=1`;
+      }
+
+      chain += label;
+      filterComplex += `${chain};`;
+      ttsLabels.push(label);
+    }
+
+    // Mix all TTS streams with the current audio using amix duration=first
+    const amixInputs = ttsLabels.length + 1;
+    filterComplex += `${finalAudioLabel}${ttsLabels.join('')}amix=inputs=${amixInputs}:duration=first[finala]`;
+    finalAudioLabel = '[finala]';
+  } else if (bgMusic) {
+    // Rename bgmixed to finala for backward compatibility in -map
+    filterComplex = filterComplex.replace('[bgmixed]', '[finala]');
+    finalAudioLabel = '[finala]';
   }
 
   args.push('-filter_complex', filterComplex, '-map', finalVideoLabel, '-map', finalAudioLabel);

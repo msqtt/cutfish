@@ -15,7 +15,8 @@ All processing happens locally—your media never leaves your device.
 - **Inter-clip transitions** (fade, dissolve, wipe, slide variants) with configurable duration; mixed transition/non-transition chains produce valid FFmpeg graphs
 - **Text overlays** with font family, size, color, position, timing—live preview and FFmpeg export with bundled DejaVu Sans, Serif, and Sans Mono fonts (written to MEMFS)
 - **Subtitles** with multiline textarea (real line breaks + auto word/char wrap by cue.width), position x/y, width, font family/size/line-height, color/transparent background (with clear button), alignment, rotation, start/end (clamped, end>start), and delete; exported as pre-rendered transparent PNGs via OffscreenCanvas (loads DejaVu fonts, fail-fast), composited by FFmpeg overlay filter with `shortest=1`/`eof_action=pass`; inserted at current project frame time
-- **Browser TTS preview** — per-subtitle enable, voice/language via getVoices, rate/pitch/volume, manual preview button, auto-play on playback entering cue (skips empty text), cancel on leaving cue/pause/project switch/unload; detects speechSynthesis+SpeechSynthesisUtterance, shows bilingual unsupported notice and disables when missing; clearly labeled as preview-only (not included in export audio)
+- **Browser TTS instant preview** — per-subtitle enable, voice/language via getVoices, rate/pitch/volume, auto-play on playback entering cue (skips empty text), cancel on leaving cue/pause/project switch/unload; detects speechSynthesis+SpeechSynthesisUtterance, shows notice when unavailable (does not block TTS enable since local VITS export still works); used only for low-latency timeline auto-preview
+- **Exportable local TTS** — per-subtitle export voice selection from curated Piper VITS voices (Chinese/English, 20–65 MB models), include-in-export toggle (default on), rate/volume controls; models downloaded externally on first use then cached in browser OPFS, all inference runs locally; preview button plays exact generated WAV (export-consistent); generated speech is burned into the final audio track via FFmpeg amix at cue project time; subtitle text and media are never uploaded
 - **Visual overlays** (drawing, rectangle, image): pen tool draws freehand on preview with real-time draft line; rectangle tool drag-draws with live dashed preview; image import inserts at current frame time; all support x/y, width/height, rotation, opacity, time range (clamped, end>start), stroke/fill/lineWidth (where applicable), and delete; drawing uses `rebaseDrawingPoints` for consistent preview/export local coordinates; `touch-action:none` in draw mode; `pointercancel`/`lostpointercapture` handled to prevent stuck state
 - **Transparent PNG renderer** for export: drawing/rectangle/image overlays AND subtitles rendered to full-resolution PNGs via `selectAndShiftOverlaysForExport`, written to MEMFS, passed to `buildFFmpegCommandExtended` overlay chain with `shortest=1:eof_action=pass`; export range filters to intersecting items only; font/image load failures are fail-fast; temp files cleaned after export
 - **Image overlay persistence**: `File` stored in IndexedDB via structured clone; `url` is runtime-only (recreated from File on load); deletion does not revoke URL (preserves undo); project switch/teardown revokes all tracked URLs
@@ -82,6 +83,8 @@ lib/transition-utils.ts    – Xfade/acrossfade filter chains
 lib/text-overlay-utils.ts  – Drawtext + PNG overlay builders
 lib/visual-overlay-utils.ts – SubtitleCue/VisualOverlay types, factories, selectAndShiftOverlaysForExport, rebaseDrawingPoints, time/drawing/FFmpeg utils
 lib/overlay-renderer.ts    – Browser-side transparent PNG renderer (OffscreenCanvas) for subtitles + visual overlays
+lib/tts-utils.ts           – Curated Piper voice list, TTS config normalization, cache keys, export cue selection
+lib/local-tts.ts           – Browser-only VITS synthesis wrapper (dynamic import, OPFS model cache)
 lib/preset-utils.ts        – Preset definitions and applicator
 lib/draft-store.ts         – Multi-project IndexedDB CRUD with migration
 lib/history.ts             – Bounded undo/redo
@@ -96,11 +99,12 @@ Export uses `buildFFmpegCommandExtended` which processes:
 3. Global: brightness/contrast/saturation EQ
 4. Text overlays: drawtext filters (for legacy TextOverlay objects)
 5. Visual overlays + Subtitles: pre-rendered to full-resolution transparent PNGs via OffscreenCanvas overlay-renderer → `overlay=0:0:shortest=1:eof_action=pass:enable='between(t,...)'`
-6. Audio: delay → fade → background music mix (amix)
+6. TTS: enabled cues synthesized to WAV via local Piper VITS (models cached in OPFS), written to MEMFS, mixed with atrim→atempo→volume→adelay→amix
+7. Audio: delay → fade → background music mix (amix)
 
 Subtitles are rendered as transparent PNGs (not via drawtext) supporting manual line breaks, auto word/char wrapping, fontFamily, fontSize, lineHeight, color, transparent background, alignment, rotation, and position. Visual overlays (drawing/rectangle/image) are also rendered to PNGs. All overlay PNG inputs use `shortest=1:eof_action=pass` to properly terminate when the main video stream ends. Background music input index accounts for both clip count and optional bgMusic, preserving correct final `-map` references.
 
-Browser TTS is preview-only and does NOT enter the export audio track.
+TTS audio is generated locally using Piper ONNX via `@diffusionstudio/vits-web`. Voice models (20–65 MB) are downloaded from a public CDN on first use and cached in the browser Origin Private File System. All inference runs entirely in the browser. Subtitle text and media are never uploaded.
 
 ## License
 

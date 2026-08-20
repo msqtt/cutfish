@@ -1,5 +1,6 @@
 import { get, set, del } from 'idb-keyval';
 import type { SubtitleCue, VisualOverlay } from './visual-overlay-utils';
+import { getDefaultLocalVoice } from './tts-utils';
 
 export const LEGACY_KEY_V1 = 'cutfish-draft-v1';
 export const DRAFTS_KEY_V2 = 'cutfish-drafts-v2';
@@ -98,6 +99,15 @@ export function applyStateDefaults(state: Record<string, unknown>): DraftState {
     subtitles: ((base.subtitles ?? []) as SubtitleCue[]).map((cue) => ({
       ...cue,
       lineHeight: cue.lineHeight ?? 1.3,
+      tts: cue.tts ? {
+        ...cue.tts,
+        exportVoiceId: typeof (cue.tts as Record<string, unknown>).exportVoiceId === 'string' && (cue.tts as Record<string, unknown>).exportVoiceId
+          ? (cue.tts as Record<string, unknown>).exportVoiceId as string
+          : getDefaultLocalVoice(cue.tts.lang).id,
+        includeInExport: typeof (cue.tts as Record<string, unknown>).includeInExport === 'boolean'
+          ? (cue.tts as Record<string, unknown>).includeInExport as boolean
+          : true,
+      } : null,
     })),
     visualOverlays: ((base.visualOverlays ?? []) as VisualOverlay[]).map(stripImageUrl),
   };

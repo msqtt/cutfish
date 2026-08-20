@@ -18,8 +18,10 @@ import {
   selectClipsForExportSpeedAware,
   type AudioFadeSettings, type ExportSettings,
   type ExtendedClipMetadata, type TransitionConfig, type TextOverlay,
-  type BgMusicExport,
+  type BgMusicExport, type TtsAudioInput,
 } from '@/lib/ffmpeg-utils';
+import { LOCAL_TTS_VOICES, getTtsCacheKey, selectTtsCuesForExport, getVoiceById, getDefaultLocalVoice } from '@/lib/tts-utils';
+import type { LocalTtsVoiceId } from '@/lib/tts-utils';
 import {
   duplicateClip, getProjectDurationSpeedAware, projectTimeForClipSpeedAware,
   moveClipToIndex, splitClipAt,
@@ -280,7 +282,7 @@ export default function Editor() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [processing, setProcessing] = useState(false);
-  const [processingStage, setProcessingStage] = useState<'loading' | 'preparing' | 'rendering'>('loading');
+  const [processingStage, setProcessingStage] = useState<'loading' | 'preparing' | 'tts' | 'rendering'>('loading');
   const [progress, setProgress] = useState(0);
   const [draftReady, setDraftReady] = useState(false);
   const [importProgress, setImportProgress] = useState<{ current: number; total: number; name: string } | null>(null);
@@ -307,6 +309,14 @@ export default function Editor() {
   const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [ttsPlaying, setTtsPlaying] = useState(false);
   const ttsSupported = typeof window !== 'undefined' && typeof window.speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined';
+
+  // Local TTS generation state
+  const [localTtsProgress, setLocalTtsProgress] = useState(0);
+  const [localTtsCueId, setLocalTtsCueId] = useState<string | null>(null);
+  const [localTtsPhase, setLocalTtsPhase] = useState<'idle' | 'downloading' | 'generating'>('idle');
+  const localTtsCacheRef = useRef(new Map<string, Blob>());
+  const localTtsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const localTtsUrlRef = useRef<string | null>(null);
 
   // Project manager state
   const [projects, setProjects] = useState<DraftProject[]>([]);
@@ -371,6 +381,9 @@ export default function Editor() {
   useEffect(() => () => {
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     ffmpegRef.current?.terminate();
+    // Clean up local TTS Audio instance and URL
+    if (localTtsAudioRef.current) { localTtsAudioRef.current.pause(); localTtsAudioRef.current = null; }
+    if (localTtsUrlRef.current) { URL.revokeObjectURL(localTtsUrlRef.current); localTtsUrlRef.current = null; }
   }, []);
 
   useEffect(() => {
@@ -893,6 +906,51 @@ export default function Editor() {
         }
       }
 
+      // ─── TTS WAV generation ───────────────────────────────────────────
+      const ttsAudioInputs: TtsAudioInput[] = [];
+      const ttsCues = selectTtsCuesForExport(state.subtitles, effectiveStart, effectiveEnd);
+      if (ttsCues.length > 0) {
+        if (cancelRequestedRef.current) return;
+        setProcessingStage('tts');
+        const { synthesize: synthLocal } = await import('@/lib/local-tts');
+
+        for (let i = 0; i < ttsCues.length; i++) {
+          if (cancelRequestedRef.current) return;
+          const ttsCue = ttsCues[i];
+          setProgress(Math.round(((i) / ttsCues.length) * 100));
+
+          // Check in-memory cache first
+          const cacheKey = getTtsCacheKey(ttsCue.text, ttsCue.voiceId, ttsCue.rate);
+          let wavBlob = localTtsCacheRef.current.get(cacheKey);
+          if (!wavBlob) {
+            wavBlob = await synthLocal(ttsCue.text, ttsCue.voiceId as LocalTtsVoiceId, (ev) => {
+              const base = (i / ttsCues.length) * 100;
+              const slice = (1 / ttsCues.length) * 100;
+              setProgress(Math.round(base + ev.progress * slice));
+            });
+            localTtsCacheRef.current.set(cacheKey, wavBlob);
+          }
+
+          const ttsFilename = `tts-${i}.wav`;
+          temporaryFiles.push(ttsFilename);
+          const wavData = new Uint8Array(await wavBlob.arrayBuffer());
+          await engine.writeFile(ttsFilename, wavData);
+
+          ttsAudioInputs.push({
+            filename: ttsFilename,
+            startTime: ttsCue.startTime,
+            endTime: ttsCue.endTime,
+            sourceTrimStart: ttsCue.sourceTrimStart,
+            rate: ttsCue.rate,
+            volume: ttsCue.volume,
+          });
+        }
+        setProgress(100);
+      }
+
+      if (cancelRequestedRef.current) return;
+      setProcessingStage('rendering');
+
       const exitCode = await engine.exec(
         buildFFmpegCommandExtended(
           metadata,
@@ -909,6 +967,7 @@ export default function Editor() {
           bgMusicExport,
           undefined,
           overlayPngs,
+          ttsAudioInputs,
         ),
       );
       if (exitCode !== 0) throw new Error(`FFmpeg exited with code ${exitCode}`);
@@ -1378,29 +1437,86 @@ export default function Editor() {
 
   // ─── TTS Manual Preview ──────────────────────────────────────────────────
 
-  const previewTts = useCallback((cue: SubtitleCue) => {
-    if (!cue.tts || !ttsSupported || !cue.text.trim()) return;
-    window.speechSynthesis?.cancel();
-    const utterance = new SpeechSynthesisUtterance(cue.text);
-    const voice = ttsVoices.find((v) => v.voiceURI === cue.tts!.voiceURI);
-    if (voice) utterance.voice = voice;
-    utterance.lang = cue.tts.lang || '';
-    utterance.rate = cue.tts.rate;
-    utterance.pitch = cue.tts.pitch;
-    utterance.volume = cue.tts.volume;
-    utterance.onend = () => { ttsModeRef.current = null; setTtsPlaying(false); };
-    utterance.onerror = () => { ttsModeRef.current = null; setTtsPlaying(false); };
-    ttsUtteranceRef.current = utterance;
-    ttsModeRef.current = 'manual';
-    window.speechSynthesis.speak(utterance);
-    setTtsPlaying(true);
-  }, [ttsVoices, ttsSupported]);
+  /** Synthesize local TTS WAV for a cue (with caching). Returns Blob or throws. */
+  const synthesizeLocalTts = useCallback(async (cue: SubtitleCue): Promise<Blob> => {
+    if (!cue.tts || !cue.text.trim()) throw new Error('No TTS config or empty text');
+    const voiceId = cue.tts.exportVoiceId || getDefaultLocalVoice(cue.tts.lang).id;
+    const cacheKey = getTtsCacheKey(cue.text, voiceId, cue.tts.rate);
+    const cached = localTtsCacheRef.current.get(cacheKey);
+    if (cached) return cached;
+
+    setLocalTtsCueId(cue.id);
+    setLocalTtsPhase('downloading');
+    setLocalTtsProgress(0);
+
+    const { synthesize } = await import('@/lib/local-tts');
+    const blob = await synthesize(cue.text.trim(), voiceId as LocalTtsVoiceId, (ev) => {
+      if (ev.progress > 0 && ev.progress < 1) {
+        setLocalTtsPhase('downloading');
+      } else if (ev.progress >= 1) {
+        setLocalTtsPhase('generating');
+      }
+      setLocalTtsProgress(Math.round(ev.progress * 100));
+    });
+
+    setLocalTtsPhase('idle');
+    setLocalTtsCueId(null);
+    setLocalTtsProgress(0);
+
+    localTtsCacheRef.current.set(cacheKey, blob);
+    return blob;
+  }, []);
+
+  /** Preview using local TTS (export-consistent WAV playback) */
+  const previewTts = useCallback(async (cue: SubtitleCue) => {
+    if (!cue.tts || !cue.text.trim()) return;
+    // Stop any existing playback
+    if (localTtsAudioRef.current) {
+      localTtsAudioRef.current.pause();
+      localTtsAudioRef.current = null;
+    }
+    if (localTtsUrlRef.current) {
+      URL.revokeObjectURL(localTtsUrlRef.current);
+      localTtsUrlRef.current = null;
+    }
+    if (ttsSupported) window.speechSynthesis?.cancel();
+
+    try {
+      const blob = await synthesizeLocalTts(cue);
+      const url = URL.createObjectURL(blob);
+      localTtsUrlRef.current = url;
+      const audio = new Audio(url);
+      audio.playbackRate = Math.max(0.5, Math.min(2, cue.tts.rate));
+      audio.volume = Math.max(0, Math.min(1, cue.tts.volume));
+      audio.onended = () => { setTtsPlaying(false); };
+      audio.onerror = () => { setTtsPlaying(false); };
+      localTtsAudioRef.current = audio;
+      ttsModeRef.current = 'manual';
+      setTtsPlaying(true);
+      await audio.play();
+    } catch (error) {
+      console.error('Local TTS preview failed', error);
+      setLocalTtsPhase('idle');
+      setLocalTtsCueId(null);
+      setLocalTtsProgress(0);
+      setTtsPlaying(false);
+      setToast({ kind: 'error', message: t('tts_generation_failed') });
+    }
+  }, [synthesizeLocalTts, ttsSupported, t]);
 
   const stopTts = useCallback(() => {
-    window.speechSynthesis?.cancel();
+    if (localTtsAudioRef.current) {
+      localTtsAudioRef.current.pause();
+      localTtsAudioRef.current = null;
+    }
+    if (localTtsUrlRef.current) {
+      URL.revokeObjectURL(localTtsUrlRef.current);
+      localTtsUrlRef.current = null;
+    }
+    if (ttsSupported) window.speechSynthesis?.cancel();
     ttsModeRef.current = null;
     setTtsPlaying(false);
-  }, []);
+  }, [ttsSupported]);
 
   // ─── Preview CSS ─────────────────────────────────────────────────────────
 
@@ -1424,7 +1540,9 @@ export default function Editor() {
 
   const processingLabel = processingStage === 'loading'
     ? t('loading_engine')
-    : processingStage === 'preparing' ? t('preparing_media') : t('exporting');
+    : processingStage === 'preparing' ? t('preparing_media')
+    : processingStage === 'tts' ? t('tts_export_stage')
+    : t('exporting');
 
   // ─── Render ──────────────────────────────────────────────────────────────
 
@@ -1733,7 +1851,7 @@ export default function Editor() {
             <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-black/80 px-4 text-white backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={processingLabel}>
               <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-indigo-400 border-t-transparent" />
               <p className="mb-3 text-lg font-medium">{processingLabel}</p>
-              {processingStage === 'rendering' && <><div className="h-2 w-full max-w-xs overflow-hidden rounded-full bg-white/20"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${progress}%` }} /></div><p className="mt-2 font-mono text-sm text-white/70">{progress.toFixed(0)}%</p></>}
+              {(processingStage === 'rendering' || processingStage === 'tts') && <><div className="h-2 w-full max-w-xs overflow-hidden rounded-full bg-white/20"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${progress}%` }} /></div><p className="mt-2 font-mono text-sm text-white/70">{progress.toFixed(0)}%</p></>}
               <button autoFocus onClick={cancelExport} className="mt-5 rounded-md border border-white/30 px-4 py-2 text-sm hover:bg-white/10">{t('cancel')}</button>
             </div>
           )}
@@ -2095,8 +2213,8 @@ export default function Editor() {
                     <h2 id="subtitles-heading" className="text-sm font-semibold">{t('subtitles')}</h2>
                     <button onClick={addSubtitle} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10"><Plus className="h-3 w-3" />{t('add_subtitle')}</button>
                   </div>
-                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2" role="note">{t('tts_notice')}</p>
-                  {!ttsSupported && <p className="text-xs text-red-500 mb-2" role="alert">{t('tts_unsupported')}</p>}
+                  {!ttsSupported && <p className="text-xs text-amber-600 dark:text-amber-400 mb-2" role="note">{t('tts_browser_unsupported')}</p>}
+                  <p className="text-xs text-[var(--muted)] mb-2">{t('tts_media_private')}</p>
                   <div className="space-y-2">
                     {state.subtitles.map((cue) => (
                       <div key={cue.id} className={`rounded border p-2 ${editingSubtitleId === cue.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
@@ -2154,10 +2272,11 @@ export default function Editor() {
                             {/* TTS */}
                             <div className="rounded border border-[var(--border)] p-2 mt-2">
                               <label className="flex items-center gap-2 text-xs mb-2">
-                                <input type="checkbox" checked={cue.tts?.enabled ?? false} disabled={!ttsSupported} onChange={(e) => {
+                                <input type="checkbox" checked={cue.tts?.enabled ?? false} onChange={(e) => {
                                   const enabled = e.target.checked;
                                   if (enabled && !cue.tts) {
-                                    updateSubtitle(cue.id, { tts: { enabled: true, voiceURI: '', lang: '', rate: 1, pitch: 1, volume: 1 } });
+                                    const defVoice = getDefaultLocalVoice(cue.text || undefined);
+                                    updateSubtitle(cue.id, { tts: { enabled: true, voiceURI: '', lang: defVoice.lang, rate: 1, pitch: 1, volume: 1, exportVoiceId: defVoice.id, includeInExport: true } });
                                   } else if (cue.tts) {
                                     updateSubtitle(cue.id, { tts: { ...cue.tts, enabled } });
                                   }
@@ -2166,23 +2285,66 @@ export default function Editor() {
                               </label>
                               {cue.tts?.enabled && (
                                 <div className="space-y-2">
-                                  <select value={cue.tts.voiceURI} onChange={(e) => {
-                                    const voice = ttsVoices.find((v) => v.voiceURI === e.target.value);
-                                    updateSubtitle(cue.id, { tts: { ...cue.tts!, voiceURI: e.target.value, lang: voice?.lang ?? cue.tts!.lang } });
-                                  }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs" aria-label={t('tts_voice')}>
-                                    <option value="">{t('tts_voice')}</option>
-                                    {ttsVoices.map((v) => <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>)}
-                                  </select>
-                                  {ttsVoices.length === 0 && <p className="text-xs text-[var(--muted)]">{t('tts_no_voices')}</p>}
+                                  {/* Export voice select */}
+                                  <label className="text-xs text-[var(--muted)]">{t('tts_export_voice')}
+                                    <select value={cue.tts.exportVoiceId} onChange={(e) => {
+                                      updateSubtitle(cue.id, { tts: { ...cue.tts!, exportVoiceId: e.target.value } });
+                                    }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs mt-0.5" aria-label={t('tts_export_voice')}>
+                                      <optgroup label={t('tts_voice_group_zh')}>
+                                        {LOCAL_TTS_VOICES.filter((v) => v.lang.startsWith('zh')).map((v) => (
+                                          <option key={v.id} value={v.id}>{v.name} ({v.lang} · {v.quality} · {v.sizeMB} MB)</option>
+                                        ))}
+                                      </optgroup>
+                                      <optgroup label={t('tts_voice_group_en')}>
+                                        {LOCAL_TTS_VOICES.filter((v) => v.lang.startsWith('en')).map((v) => (
+                                          <option key={v.id} value={v.id}>{v.name} ({v.lang} · {v.quality} · {v.sizeMB} MB)</option>
+                                        ))}
+                                      </optgroup>
+                                    </select>
+                                  </label>
+                                  {/* Include in export checkbox */}
+                                  <label className="flex items-center gap-2 text-xs">
+                                    <input type="checkbox" checked={cue.tts.includeInExport !== false} onChange={(e) => {
+                                      updateSubtitle(cue.id, { tts: { ...cue.tts!, includeInExport: e.target.checked } });
+                                    }} className="accent-indigo-500" />
+                                    <span>{t('tts_include_export')}</span>
+                                  </label>
+                                  {/* Browser instant preview voice (for auto-play) */}
+                                  {ttsSupported && (
+                                    <details className="text-xs">
+                                      <summary className="cursor-pointer text-[var(--muted)] hover:text-[var(--text)]">{t('tts_instant_preview')}</summary>
+                                      <div className="mt-1 space-y-1.5">
+                                        <select value={cue.tts.voiceURI} onChange={(e) => {
+                                          const voice = ttsVoices.find((v) => v.voiceURI === e.target.value);
+                                          updateSubtitle(cue.id, { tts: { ...cue.tts!, voiceURI: e.target.value, lang: voice?.lang ?? cue.tts!.lang } });
+                                        }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs" aria-label={t('tts_voice')}>
+                                          <option value="">{t('tts_voice')}</option>
+                                          {ttsVoices.map((v) => <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>)}
+                                        </select>
+                                        {ttsVoices.length === 0 && <p className="text-xs text-[var(--muted)]">{t('tts_no_voices')}</p>}
+                                      </div>
+                                    </details>
+                                  )}
+                                  {/* Rate / Pitch / Volume */}
                                   <div className="grid grid-cols-3 gap-1.5">
                                     <label className="text-xs text-[var(--muted)]">{t('tts_rate')}<input type="number" min={0.5} max={2} step={0.1} value={cue.tts.rate} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, rate: clampNumber(e.target.value, 0.5, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                                     <label className="text-xs text-[var(--muted)]">{t('tts_pitch')}<input type="number" min={0} max={2} step={0.1} value={cue.tts.pitch} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, pitch: clampNumber(e.target.value, 0, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                                     <label className="text-xs text-[var(--muted)]">{t('tts_volume')}<input type="number" min={0} max={1} step={0.1} value={cue.tts.volume} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, volume: clampNumber(e.target.value, 0, 1, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                                   </div>
-                                  <div className="flex gap-2">
-                                    <button onClick={() => previewTts(cue)} disabled={ttsPlaying} className="rounded bg-indigo-600 px-2 py-1 text-xs text-white hover:bg-indigo-500 disabled:opacity-40">{t('tts_preview')}</button>
+                                  {/* Preview (local WAV) / Stop */}
+                                  <div className="flex gap-2 items-center">
+                                    <button onClick={() => void previewTts(cue)} disabled={ttsPlaying || localTtsPhase !== 'idle'} className="rounded bg-indigo-600 px-2 py-1 text-xs text-white hover:bg-indigo-500 disabled:opacity-40">{t('tts_local_preview')}</button>
                                     <button onClick={stopTts} disabled={!ttsPlaying} className="rounded border border-[var(--border)] px-2 py-1 text-xs hover:bg-[var(--raised)] disabled:opacity-40">{t('tts_stop')}</button>
+                                    {localTtsCueId === cue.id && localTtsPhase !== 'idle' && (
+                                      <span className="text-xs text-[var(--muted)]">
+                                        {localTtsPhase === 'downloading' ? t('tts_downloading_model') : t('tts_generating')} {t('tts_progress', { percent: localTtsProgress })}
+                                      </span>
+                                    )}
                                   </div>
+                                  {/* Model info */}
+                                  <p className="text-xs text-[var(--muted)]">
+                                    {t('tts_model_info', { size: `${(getVoiceById(cue.tts.exportVoiceId)?.sizeMB ?? 63.2).toFixed(1)}` })}
+                                  </p>
                                 </div>
                               )}
                             </div>

@@ -26,6 +26,8 @@ export interface SubtitleCue {
     rate: number;
     pitch: number;
     volume: number;
+    exportVoiceId: string;
+    includeInExport: boolean;
   } | null;
 }
 

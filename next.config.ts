@@ -17,6 +17,25 @@ const nextConfig: NextConfig = {
   async headers() {
     return [{ source: '/(.*)', headers: securityHeaders }];
   },
+  // @diffusionstudio/vits-web bundles onnxruntime which references fs/path for Node detection.
+  // These are never reached at runtime in the browser, but the bundler needs fallbacks.
+  turbopack: {
+    resolveAlias: {
+      fs: { browser: './lib/empty-module.js' },
+      path: { browser: './lib/empty-module.js' },
+    },
+  },
+  webpack(config, { isServer }) {
+    if (!isServer) {
+      config.resolve = config.resolve || {};
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        path: false,
+      };
+    }
+    return config;
+  },
 };
 
 export default nextConfig;

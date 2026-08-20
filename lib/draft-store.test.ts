@@ -280,3 +280,58 @@ describe('backgroundMusic file persistence (B2)', () => {
     expect(loaded!.state.backgroundMusic).toBeNull();
   });
 });
+
+describe('applyStateDefaults TTS migration', () => {
+  it('adds exportVoiceId and includeInExport defaults to old subtitles with tts', () => {
+    const subtitles = [
+      {
+        id: 's1', text: 'Hello', fontFamily: 'sans', fontSize: 48, lineHeight: 1.3,
+        color: '#fff', backgroundColor: '', position: { x: 50, y: 50 }, width: 80,
+        align: 'center', rotation: 0, startTime: 0, endTime: 5,
+        tts: { enabled: true, voiceURI: '', lang: 'zh-CN', rate: 1, pitch: 1, volume: 1 },
+      },
+    ];
+    const result = applyStateDefaults({ clips: [], subtitles } as unknown as Record<string, unknown>);
+    expect(result.subtitles[0].tts!.exportVoiceId).toBe('zh_CN-huayan-x_low');
+    expect(result.subtitles[0].tts!.includeInExport).toBe(true);
+  });
+
+  it('preserves existing exportVoiceId when present', () => {
+    const subtitles = [
+      {
+        id: 's2', text: 'Hi', fontFamily: 'sans', fontSize: 48, lineHeight: 1.3,
+        color: '#fff', backgroundColor: '', position: { x: 50, y: 50 }, width: 80,
+        align: 'center', rotation: 0, startTime: 0, endTime: 5,
+        tts: { enabled: true, voiceURI: '', lang: 'en-US', rate: 1, pitch: 1, volume: 1, exportVoiceId: 'en_US-ryan-medium', includeInExport: false },
+      },
+    ];
+    const result = applyStateDefaults({ clips: [], subtitles } as unknown as Record<string, unknown>);
+    expect(result.subtitles[0].tts!.exportVoiceId).toBe('en_US-ryan-medium');
+    expect(result.subtitles[0].tts!.includeInExport).toBe(false);
+  });
+
+  it('defaults exportVoiceId based on lang for English', () => {
+    const subtitles = [
+      {
+        id: 's3', text: 'Test', fontFamily: 'sans', fontSize: 48, lineHeight: 1.3,
+        color: '#fff', backgroundColor: '', position: { x: 50, y: 50 }, width: 80,
+        align: 'center', rotation: 0, startTime: 0, endTime: 5,
+        tts: { enabled: true, voiceURI: '', lang: 'en-US', rate: 1, pitch: 1, volume: 1 },
+      },
+    ];
+    const result = applyStateDefaults({ clips: [], subtitles } as unknown as Record<string, unknown>);
+    expect(result.subtitles[0].tts!.exportVoiceId).toBe('en_US-hfc_female-medium');
+  });
+
+  it('preserves null tts on subtitles', () => {
+    const subtitles = [
+      {
+        id: 's4', text: 'No TTS', fontFamily: 'sans', fontSize: 48, lineHeight: 1.3,
+        color: '#fff', backgroundColor: '', position: { x: 50, y: 50 }, width: 80,
+        align: 'center', rotation: 0, startTime: 0, endTime: 5, tts: null,
+      },
+    ];
+    const result = applyStateDefaults({ clips: [], subtitles } as unknown as Record<string, unknown>);
+    expect(result.subtitles[0].tts).toBeNull();
+  });
+});
