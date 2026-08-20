@@ -14,6 +14,11 @@ All processing happens locally—your media never leaves your device.
 - **Canvas aspect ratio** (16:9, 9:16, 4:3, 1:1, auto) with contain/cover/stretch fit modes; preview mirrors the selected aspect and fit
 - **Inter-clip transitions** (fade, dissolve, wipe, slide variants) with configurable duration; mixed transition/non-transition chains produce valid FFmpeg graphs
 - **Text overlays** with font family, size, color, position, timing—live preview and FFmpeg export with bundled DejaVu Sans, Serif, and Sans Mono fonts (written to MEMFS)
+- **Subtitles** with multiline textarea (real line breaks + auto word/char wrap by cue.width), position x/y, width, font family/size/line-height, color/transparent background (with clear button), alignment, rotation, start/end (clamped, end>start), and delete; exported as pre-rendered transparent PNGs via OffscreenCanvas (loads DejaVu fonts, fail-fast), composited by FFmpeg overlay filter with `shortest=1`/`eof_action=pass`; inserted at current project frame time
+- **Browser TTS preview** — per-subtitle enable, voice/language via getVoices, rate/pitch/volume, manual preview button, auto-play on playback entering cue (skips empty text), cancel on leaving cue/pause/project switch/unload; detects speechSynthesis+SpeechSynthesisUtterance, shows bilingual unsupported notice and disables when missing; clearly labeled as preview-only (not included in export audio)
+- **Visual overlays** (drawing, rectangle, image): pen tool draws freehand on preview with real-time draft line; rectangle tool drag-draws with live dashed preview; image import inserts at current frame time; all support x/y, width/height, rotation, opacity, time range (clamped, end>start), stroke/fill/lineWidth (where applicable), and delete; drawing uses `rebaseDrawingPoints` for consistent preview/export local coordinates; `touch-action:none` in draw mode; `pointercancel`/`lostpointercapture` handled to prevent stuck state
+- **Transparent PNG renderer** for export: drawing/rectangle/image overlays AND subtitles rendered to full-resolution PNGs via `selectAndShiftOverlaysForExport`, written to MEMFS, passed to `buildFFmpegCommandExtended` overlay chain with `shortest=1:eof_action=pass`; export range filters to intersecting items only; font/image load failures are fail-fast; temp files cleaned after export
+- **Image overlay persistence**: `File` stored in IndexedDB via structured clone; `url` is runtime-only (recreated from File on load); deletion does not revoke URL (preserves undo); project switch/teardown revokes all tracked URLs
 - **Background audio** import with volume, loop, fade-in, fade-out, mixing, and File persistence in IndexedDB (restored with tracked URL on project switch)
 - **Global filters** (brightness, contrast, saturation) with real-time CSS preview
 - **Audio sync** adjustment (±5000ms) and global fade-in/fade-out
@@ -22,7 +27,7 @@ All processing happens locally—your media never leaves your device.
 - **Multi-project management** (create, switch, rename, duplicate, delete) with IndexedDB persistence; force-save before switch/new/delete to prevent stale state
 - **Legacy migration** from v1 single-draft to v2 multi-project format
 - **Timeline** with zoom controls, draggable playhead, auto-follow, speed-aware widths, and collapsible panel; shows editing + output duration when transitions reduce total
-- **Inspector** with tabbed UI (Clip, Project, Audio, Effects) and sticky export button; mobile bottom-sheet on small screens
+- **Inspector** with tabbed UI (Clip, Project, Audio, Effects, Subtitles & Overlays) and sticky export button; mobile bottom-sheet on small screens
 - **Fullscreen preview** (F key or button) with press-and-hold before/after filter comparison
 - **Keyboard shortcuts** with `?` help modal, focus trapping, and initial focus on open
 - **Localized last-saved timestamp** in save status indicator
@@ -73,6 +78,8 @@ lib/editor-utils.ts        – Pure clip operations and speed-aware time mapping
 lib/ffmpeg-utils.ts        – FFmpeg command builders (basic + extended with all features)
 lib/transition-utils.ts    – Xfade/acrossfade filter chains
 lib/text-overlay-utils.ts  – Drawtext + PNG overlay builders
+lib/visual-overlay-utils.ts – SubtitleCue/VisualOverlay types, factories, selectAndShiftOverlaysForExport, rebaseDrawingPoints, time/drawing/FFmpeg utils
+lib/overlay-renderer.ts    – Browser-side transparent PNG renderer (OffscreenCanvas) for subtitles + visual overlays
 lib/preset-utils.ts        – Preset definitions and applicator
 lib/draft-store.ts         – Multi-project IndexedDB CRUD with migration
 lib/history.ts             – Bounded undo/redo
@@ -85,10 +92,13 @@ Export uses `buildFFmpegCommandExtended` which processes:
 1. Per-clip: trim → speed → rotation/flip → scale/fit → volume
 2. Transitions: xfade/acrossfade between clips (or simple concat)
 3. Global: brightness/contrast/saturation EQ
-4. Text overlays: drawtext filters
-5. Audio: delay → fade → background music mix (amix)
+4. Text overlays: drawtext filters (for legacy TextOverlay objects)
+5. Visual overlays + Subtitles: pre-rendered to full-resolution transparent PNGs via OffscreenCanvas overlay-renderer → `overlay=0:0:shortest=1:eof_action=pass:enable='between(t,...)'`
+6. Audio: delay → fade → background music mix (amix)
 
-Canvas cover mode correctly scales up then crops (not pads).
+Subtitles are rendered as transparent PNGs (not via drawtext) supporting manual line breaks, auto word/char wrapping, fontFamily, fontSize, lineHeight, color, transparent background, alignment, rotation, and position. Visual overlays (drawing/rectangle/image) are also rendered to PNGs. All overlay PNG inputs use `shortest=1:eof_action=pass` to properly terminate when the main video stream ends. Background music input index accounts for both clip count and optional bgMusic, preserving correct final `-map` references.
+
+Browser TTS is preview-only and does NOT enter the export audio track.
 
 ## License
 

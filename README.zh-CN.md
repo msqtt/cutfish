@@ -14,6 +14,11 @@
 - **画布比例**（16:9、9:16、4:3、1:1、自动）与适应/覆盖/拉伸模式；预览实时反映画布比例和填充模式
 - **片段间转场**（淡入淡出、溶解、擦除、滑动变体）可配置时长；混合有/无转场链生成有效 FFmpeg 滤镜图
 - **文字叠加**：字体、大小、颜色、位置、时间——实时预览与 FFmpeg 导出（内置 DejaVu Sans、Serif 与 Sans Mono 字体，写入 MEMFS）
+- **字幕**：多行文本（手动换行 + 按 cue.width 自动按词/字符换行）、位置 x/y、宽度、字体/字号/行高、颜色/可透明背景（带清除按钮）、对齐、旋转、起止时间（数值钳制且 end>start）；按当前项目帧时间插入；导出时渲染为全画布透明 PNG（OffscreenCanvas，加载 DejaVu 字体 fail-fast），通过 FFmpeg overlay 滤镜烧录（shortest=1/eof_action=pass）
+- **浏览器 TTS 预览**：逐字幕启用，语音/语言选择，语速/音调/音量；播放进入 cue 自动朗读（空文本不读），离开 cue/暂停/切项目/卸载时 cancel；检测 speechSynthesis + SpeechSynthesisUtterance，不支持时禁用并显示双语提示；TTS 明确仅本地浏览器预览，不进入导出音轨
+- **视觉标注**（画笔、矩形、图片）：画笔在预览上自由绘制并实时显示草稿线条；矩形工具拖拽绘制并实时虚线预览；图片导入在当前帧时间插入；支持 x/y、宽高、旋转、不透明度、时间范围（钳制 end>start）、描边/填充/线宽；绘制模式 touch-action:none，处理 pointercancel/lostpointercapture 防止卡住；画笔坐标使用 rebaseDrawingPoints 转为 bounds 内局部 0..1 坐标，预览/导出一致
+- **透明 PNG 渲染器**：字幕 + 视觉标注均通过 `selectAndShiftOverlaysForExport` 裁剪导出范围，渲染为全分辨率 PNG，写入 MEMFS 传递给 `buildFFmpegCommandExtended`，overlay 链使用 `shortest=1:eof_action=pass`；字体/图片加载失败 fail-fast；导出后清理临时文件
+- **图片标注持久化**：File 存入 IndexedDB（结构化克隆），url 仅运行时（加载项目时从 File 重建）；删除不立即 revoke（保留 undo）；项目切换/teardown 统一撤销所有 tracked URL
 - **背景音乐**：导入、音量、循环、淡入、淡出、混音，File 持久化在 IndexedDB 中（切换项目时恢复 URL）
 - **全局滤镜**（亮度、对比度、饱和度）实时 CSS 预览
 - **音频同步**调整（±5000ms）与全局淡入/淡出
@@ -70,9 +75,11 @@ components/Editor.tsx      – 主编排器，标签式检查器、项目管理�
 components/ExportPanel.tsx – 导出范围/质量/大小模态框内容
 components/Timeline.tsx    – 可缩放时间轴，可拖动播放头，自动跟随
 lib/editor-utils.ts        – 纯片段操作与速度感知时间映射
-lib/ffmpeg-utils.ts        – FFmpeg 命令构建器（基础 + 扩展全功能）
+lib/ffmpeg-utils.ts        – FFmpeg 命令构建器（基础 + 扩展全功能，PNG overlay 使用 shortest=1/eof_action=pass）
 lib/transition-utils.ts    – xfade/acrossfade 滤镜链
 lib/text-overlay-utils.ts  – drawtext + PNG 叠加构建器
+lib/visual-overlay-utils.ts – SubtitleCue/VisualOverlay 类型、工厂、selectAndShiftOverlaysForExport、rebaseDrawingPoints
+lib/overlay-renderer.ts    – 浏览器端透明 PNG 渲染器（OffscreenCanvas），字幕 + 视觉标注
 lib/preset-utils.ts        – 预设定义与应用器
 lib/draft-store.ts         – 多项目 IndexedDB CRUD 与迁移
 lib/history.ts             – 有界撤销/重做
@@ -85,10 +92,13 @@ lib/i18n.ts                – 中英文翻译资源
 1. 逐片段：裁剪 → 速度 → 旋转/翻转 → 缩放/填充 → 音量
 2. 转场：xfade/acrossfade（或简单拼接）
 3. 全局：亮度/对比度/饱和度 EQ
-4. 文字叠加：drawtext 滤镜
-5. 音频：延迟 → 淡入淡出 → 背景音乐混音（amix）
+4. 文字叠加：drawtext 滤镜（遗留 TextOverlay 对象）
+5. 字幕 + 视觉标注：通过 OffscreenCanvas 渲染为全画布透明 PNG → `overlay=0:0:shortest=1:eof_action=pass:enable='between(t,...)'`
+6. 音频：延迟 → 淡入淡出 → 背景音乐混音（amix）
 
-覆盖模式正确地先放大后裁剪（而非填充）。
+字幕渲染为透明 PNG（非 drawtext），支持手动换行、自动按词/字符换行（基于 cue.width）、fontFamily、fontSize、lineHeight、color、可透明背景、align、position、rotation。视觉标注（画笔/矩形/图片）同样渲染为 PNG。所有 PNG overlay 使用 `shortest=1:eof_action=pass` 确保主视频结束时正确终止。
+
+浏览器 TTS 仅用于本地预览，不进入导出音轨。按当前项目帧时间插入字幕和标注。
 
 ## 许可证
 

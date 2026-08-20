@@ -13,6 +13,7 @@ import {
   type TransitionConfig,
   type TextOverlay,
   type BgMusicExport,
+  type PngOverlayInput,
 } from './ffmpeg-utils';
 
 const filters = { brightness: 110, contrast: 95, saturation: 120 };
@@ -359,5 +360,136 @@ describe('selectClipsForExportSpeedAware (H1)', () => {
     expect(result[0].trimEnd).toBeCloseTo(5);
     expect(result[1].trimStart).toBeCloseTo(0);
     expect(result[1].trimEnd).toBeCloseTo(1);
+  });
+});
+
+describe('buildFFmpegCommandExtended with overlayPngs', () => {
+  const extClips: ExtendedClipMetadata[] = [
+    { id: 'a', filename: 'a.mp4', trimStart: 0, trimEnd: 5, hasAudio: true, volume: 100, muted: false, rotation: 0, flipH: false, flipV: false, speed: 1.0 },
+    { id: 'b', filename: 'b.mp4', trimStart: 0, trimEnd: 5, hasAudio: true, volume: 100, muted: false, rotation: 0, flipH: false, flipV: false, speed: 1.0 },
+  ];
+
+  const pngs: PngOverlayInput[] = [
+    { filename: 'sub_0.png', startTime: 1, endTime: 4 },
+    { filename: 'sub_1.png', startTime: 5, endTime: 8 },
+  ];
+
+  it('adds -loop 1 -i for each PNG overlay', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, pngs);
+    // PNG inputs should come after clip inputs
+    const argStr = args.join(' ');
+    expect(argStr).toContain('-loop 1 -i sub_0.png');
+    expect(argStr).toContain('-loop 1 -i sub_1.png');
+  });
+
+  it('computes correct input indices for PNG overlays (no bgMusic)', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, pngs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // 2 clips, no bgMusic → PNG inputs start at index 2
+    expect(graph).toContain('[2:v]overlay=0:0:shortest=1:eof_action=pass');
+    expect(graph).toContain('[3:v]overlay=0:0:shortest=1:eof_action=pass');
+  });
+
+  it('computes correct input indices for PNG overlays (with bgMusic)', () => {
+    const bgMusic: BgMusicExport = { filename: 'bg.mp3', volume: 100, loop: false, fadeIn: 0, fadeOut: 0 };
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], bgMusic, undefined, pngs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // 2 clips + 1 bgMusic → PNG inputs start at index 3
+    expect(graph).toContain('[3:v]overlay=0:0:shortest=1:eof_action=pass');
+    expect(graph).toContain('[4:v]overlay=0:0:shortest=1:eof_action=pass');
+  });
+
+  it('includes enable between(t,start,end) for each PNG overlay', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, pngs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain("shortest=1:eof_action=pass:enable='between(t,1,4)'");
+    expect(graph).toContain("shortest=1:eof_action=pass:enable='between(t,5,8)'");
+  });
+
+  it('chains overlay filters sequentially with intermediate labels', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, pngs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // First overlay outputs [ov0], second outputs [overlayv]
+    expect(graph).toContain('[ov0]');
+    expect(graph).toContain('[overlayv]');
+  });
+
+  it('maps final video to [overlayv] when PNGs are present', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, pngs);
+    expect(args).toContain('[overlayv]');
+    // Should not map [filteredv] since overlayv is the final
+    const mapIdx = args.indexOf('-map');
+    expect(args[mapIdx + 1]).toBe('[overlayv]');
+  });
+
+  it('does not break existing behavior when overlayPngs is empty', () => {
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, []);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).not.toContain('[overlayv]');
+    expect(graph).not.toContain('-loop 1');
+    // Should still produce valid output
+    expect(args).toContain('output.mp4');
+  });
+
+  it('does not break when overlayPngs param is omitted (default)', () => {
+    // Call without the overlayPngs argument — should use default []
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null);
+    expect(args).toContain('output.mp4');
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).not.toContain('[overlayv]');
+  });
+
+  it('works with both text overlays and PNG overlays', () => {
+    const textOverlays: TextOverlay[] = [
+      { id: 'o1', text: 'Hello', fontFamily: 'sans', fontSize: 48, color: '#ffffff', position: { x: 50, y: 50 }, startTime: 0, endTime: 3 },
+    ];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], textOverlays, null, undefined, pngs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // Should have drawtext chain producing [filteredv], then overlay chain on top
+    expect(graph).toContain('drawtext=');
+    expect(graph).toContain('[filteredv]');
+    expect(graph).toContain('[overlayv]');
+    // The overlay chain should start from [filteredv]
+    expect(graph).toContain("[filteredv][2:v]overlay=0:0:shortest=1:eof_action=pass:enable='between(t,1,4)'[ov0]");
+  });
+
+  it('handles single PNG overlay correctly', () => {
+    const singlePng: PngOverlayInput[] = [{ filename: 'only.png', startTime: 2, endTime: 5 }];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], null, undefined, singlePng);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // Single overlay goes directly to [overlayv]
+    expect(graph).toContain("[filteredv][2:v]overlay=0:0:shortest=1:eof_action=pass:enable='between(t,2,5)'[overlayv]");
+    expect(graph).not.toContain('[ov0]');
+  });
+
+  it('preserves correct -map order with bgMusic + multiple PNGs', () => {
+    const bgMusic: BgMusicExport = { filename: 'bg.mp3', volume: 80, loop: true, fadeIn: 1, fadeOut: 2 };
+    const manyPngs: PngOverlayInput[] = [
+      { filename: 'a.png', startTime: 0, endTime: 2 },
+      { filename: 'b.png', startTime: 2, endTime: 4 },
+      { filename: 'c.png', startTime: 4, endTime: 6 },
+    ];
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], bgMusic, undefined, manyPngs);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // 2 clips + 1 bg → pngs start at index 3
+    expect(graph).toContain('[3:v]overlay=0:0:shortest=1:eof_action=pass');
+    expect(graph).toContain('[4:v]overlay=0:0:shortest=1:eof_action=pass');
+    expect(graph).toContain('[5:v]overlay=0:0:shortest=1:eof_action=pass');
+    // Final video should be [overlayv], audio should be [finala]
+    const mapIdx = args.indexOf('-map');
+    expect(args[mapIdx + 1]).toBe('[overlayv]');
+    expect(args[mapIdx + 3]).toBe('[finala]');
+    // Should include amix
+    expect(graph).toContain('amix=inputs=2');
+  });
+
+  it('works with bgMusic but no PNGs - final map is [filteredv] and [finala]', () => {
+    const bgMusic: BgMusicExport = { filename: 'bg.mp3', volume: 100, loop: false, fadeIn: 0, fadeOut: 0 };
+    const args = buildFFmpegCommandExtended(extClips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], bgMusic, undefined, []);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).not.toContain('[overlayv]');
+    const mapIdx = args.indexOf('-map');
+    expect(args[mapIdx + 1]).toBe('[filteredv]');
+    expect(args[mapIdx + 3]).toBe('[finala]');
   });
 });

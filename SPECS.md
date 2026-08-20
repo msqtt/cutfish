@@ -55,6 +55,13 @@ Cutfish is a privacy-first browser video editor. Source files, drafts, and rende
 - Project presets UI with apply and visual selection
 - Export wired to `buildFFmpegCommandExtended` with all features: per-clip volume/mute, master volume, rotation, flips, speed, transitions, text overlays, background audio mixing
 - Bundled DejaVu Sans font (permissively licensed) under `public/fonts/` written to FFmpeg MEMFS before drawtext filter execution (B3)
+- Subtitle CRUD (SubtitleCue): multiline text (manual \n + auto word/char wrap by cue.width), fontFamily, fontSize, lineHeight (default 1.3), color, transparent backgroundColor (with clear button), align, position x/y %, width %, rotation, start/end time; inserted at current project frame; all numeric fields clamped, end > start enforced
+- Subtitle export: rendered to full-canvas transparent PNGs via OffscreenCanvas overlay-renderer (loads bundled DejaVu fonts, fail-fast); PNGs written to MEMFS and passed as overlayPngs to `buildFFmpegCommandExtended`; drawtext filter is NOT used for subtitles
+- Visual overlays (drawing, rectangle, image): pen tool draws freehand, rectangle tool drag-draws, image via file picker; coordinates in overlay-local 0..1 after `rebaseDrawingPoints`; live preview via SVG/CSS with real-time pen/rect draft; end > start clamped
+- Visual overlay export: intersecting items selected via `selectAndShiftOverlaysForExport`, rendered to transparent PNGs, composited via FFmpeg `overlay=0:0:shortest=1:eof_action=pass:enable='between(t,...)'`
+- Drawing mode: touch-action:none, pointercancel/lostpointercapture handled to prevent stuck state
+- Browser TTS: per-subtitle enable with voice/language selection, rate/pitch/volume; auto-plays on playback entering cue (skips empty text), cancels on leaving cue/pause/project switch/unmount; detection guards speechSynthesis + SpeechSynthesisUtterance availability, shows bilingual unsupported notice and disables checkbox if missing; TTS is explicitly local browser preview only—it does NOT enter the export audio track
+- Image overlay File persisted via IndexedDB (structured clone); `url` field is runtime-only (recreated from File on project load via `createTrackedUrl`); deletion does not immediately revoke URL (preserving undo); project switch and teardown revoke all tracked object URLs
 
 ## 3. Component architecture
 
@@ -66,14 +73,16 @@ components/ExportPanel.tsx modal content for project range, profile controls, an
 components/Timeline.tsx    trimmed timeline, playhead, seek, drag ordering, zoom, auto-follow, collapse
 lib/editor-utils.ts        pure split, duplicate, reorder, speed-aware project-time mapping, rotation CSS, canvas dimensions, atempo chains
 lib/history.ts             pure bounded history transitions + React adapter
-lib/ffmpeg-utils.ts        pure validated FFmpeg argument generation (basic + extended with volume, speed, rotation, transitions, text, bgmusic, cover crop fix)
+lib/ffmpeg-utils.ts        pure validated FFmpeg argument generation (basic + extended with volume, speed, rotation, transitions, text, bgmusic, cover crop fix, PNG overlay with shortest=1/eof_action=pass)
 lib/transition-utils.ts    pure xfade/acrossfade filter chain builder
 lib/text-overlay-utils.ts  drawtext filter builder + PNG overlay fallback strategy
+lib/visual-overlay-utils.ts  SubtitleCue/VisualOverlay types, factories, selectAndShiftOverlaysForExport, rebaseDrawingPoints, time/drawing/FFmpeg utils
+lib/overlay-renderer.ts    browser-side transparent PNG renderer (OffscreenCanvas) for subtitles + visual overlays with DejaVu font loading
 lib/preset-utils.ts        preset definitions and applicator
 lib/draft-store.ts         multi-project IndexedDB CRUD with v1→v2 migration, clip defaults, state defaults
 lib/i18n.ts                English and Chinese resources (complete coverage of all UI strings)
-IndexedDB                  multi-project draft state and source File objects
-FFmpeg.wasm MEMFS          temporary inputs and rendered output
+IndexedDB                  multi-project draft state and source File objects (incl. image overlay Files)
+FFmpeg.wasm MEMFS          temporary inputs, overlay PNGs, and rendered output
 ```
 
 ## 4. State and data flow
@@ -267,9 +276,92 @@ Help modal (`?` key) provides a keyboard shortcuts reference with focus trap. Pr
 | ? | Show shortcuts help |
 | Escape | Close active modal/panel |
 
-## 10. Verification
+## 10. Subtitles, visual overlays, and TTS preview
 
-Pure history transitions, editor timeline operations, FFmpeg argument generation, transition chain building, text overlay filter building, preset application, and draft store CRUD require unit tests. Every release must pass:
+### 10.1 Data models
+
+```ts
+/** A subtitle cue with optional TTS preview config */
+interface SubtitleCue {
+  id: string;
+  text: string;
+  fontFamily: 'sans' | 'serif' | 'mono';
+  fontSize: number;             // 12–200
+  color: string;                // hex #rrggbb
+  backgroundColor: string;     // hex #rrggbbaa, '' = no background
+  position: { x: number; y: number };  // 0–100 percent, center anchor
+  width: number;               // 0–100 percent, 0 = auto (no wrap)
+  align: 'left' | 'center' | 'right';
+  rotation: number;            // -180 ~ 180 degrees
+  startTime: number;           // project time (seconds)
+  endTime: number;             // project time (seconds)
+  tts: {
+    enabled: boolean;
+    voiceURI: string;
+    lang: string;              // BCP 47
+    rate: number;              // 0.1–10
+    pitch: number;             // 0–2
+    volume: number;            // 0–1
+  } | null;
+}
+
+/** Visual overlay types */
+type VisualOverlayType = 'drawing' | 'rectangle' | 'image';
+
+interface VisualOverlayBase {
+  id: string;
+  type: VisualOverlayType;
+  position: { x: number; y: number };  // 0–100 percent, center anchor
+  size: { w: number; h: number };      // 0–100 percent
+  rotation: number;                    // -180~180 degrees
+  opacity: number;                     // 0–1
+  startTime: number;                   // project time (seconds)
+  endTime: number;                     // project time (seconds)
+}
+
+interface DrawingOverlay extends VisualOverlayBase {
+  type: 'drawing';
+  points: Array<{ x: number; y: number }>;  // normalized 0–1 within size bounds
+  strokeColor: string;
+  strokeWidth: number;         // percent of canvas height
+}
+
+interface RectangleOverlay extends VisualOverlayBase {
+  type: 'rectangle';
+  strokeColor: string;
+  strokeWidth: number;
+  fillColor: string;           // '' = transparent
+  borderRadius: number;
+}
+
+interface ImageOverlay extends VisualOverlayBase {
+  type: 'image';
+  file?: File;                 // persisted via IndexedDB structured clone
+  url?: string;                // runtime only, not persisted
+}
+
+type VisualOverlay = DrawingOverlay | RectangleOverlay | ImageOverlay;
+```
+
+### 10.2 Project time semantics
+
+All `startTime` and `endTime` values on SubtitleCue and VisualOverlay are expressed in **project time** — the elapsed playback position within the ordered, speed-adjusted, trimmed clip sequence starting at zero. When exporting a partial range `[rangeStart, rangeEnd]`, overlay times are shifted by `-rangeStart` so that `t=0` in the exported file corresponds to `rangeStart` in the project.
+
+### 10.3 TTS preview (browser-local only)
+
+TTS uses the Web `SpeechSynthesis` API for real-time local playback preview. When a subtitle cue with `tts.enabled === true` enters the active time window during playback, the browser speaks the cue text with the configured voice/rate/pitch/volume and cancels at the cue boundary, pause, or project switch. TTS **does not** produce audio in the exported video because browser speech output cannot be captured privately and portably without a server. Export renders subtitles visually as burned-in transparent PNG overlays with wrapping, line height, background, alignment, position, and rotation preserved.
+
+### 10.4 Export strategy: transparent PNG overlay inputs
+
+At export time, each subtitle and visual overlay is pre-rendered into a full-canvas-sized transparent PNG (off-screen Canvas). These PNGs are written to FFmpeg MEMFS and added as additional inputs with `-loop 1 -i <filename>`. The filter graph chains sequential `overlay=0:0:enable='between(t,start,end)'` filters after the EQ stage and before final output. Input indices are computed as: video clips (0..N-1), optional background music (N if present), then overlay PNGs (N+1..M or N..M if no bg music). Coordinates and rotation are baked into the PNG at render time so the overlay filter uses `0:0` positioning.
+
+### 10.5 DraftState persistence
+
+`DraftState` includes `subtitles: SubtitleCue[]` and `visualOverlays: VisualOverlay[]`. Image overlay `File` objects are preserved via IndexedDB structured clone. The `url` field is runtime-only and recreated from the `File` on load. Old drafts missing these fields default to empty arrays. The existing `textOverlays` field is retained as `[]` for backward compatibility until the UI migration is complete.
+
+## 11. Verification
+
+Pure history transitions, editor timeline operations, FFmpeg argument generation, transition chain building, text overlay filter building, visual overlay utilities, preset application, and draft store CRUD require unit tests. Every release must pass:
 
 ```bash
 npm test

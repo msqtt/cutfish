@@ -1,4 +1,5 @@
 import { get, set, del } from 'idb-keyval';
+import type { SubtitleCue, VisualOverlay } from './visual-overlay-utils';
 
 export const LEGACY_KEY_V1 = 'cutfish-draft-v1';
 export const DRAFTS_KEY_V2 = 'cutfish-drafts-v2';
@@ -43,6 +44,8 @@ export interface DraftState {
   backgroundMusic: { name: string; volume: number; loop: boolean; fadeIn: number; fadeOut: number; file?: File } | null;
   presetName: string | null;
   customPresets?: Array<{ name: string; canvasAspect: string; canvasFit: string; exportSettings: { resolution: string; frameRate: number; quality: string } }>;
+  subtitles: SubtitleCue[];
+  visualOverlays: VisualOverlay[];
 }
 
 export interface DraftProject {
@@ -92,7 +95,22 @@ export function applyStateDefaults(state: Record<string, unknown>): DraftState {
     textOverlays: base.textOverlays ?? [],
     backgroundMusic: base.backgroundMusic ?? null,
     presetName: base.presetName ?? null,
+    subtitles: ((base.subtitles ?? []) as SubtitleCue[]).map((cue) => ({
+      ...cue,
+      lineHeight: cue.lineHeight ?? 1.3,
+    })),
+    visualOverlays: ((base.visualOverlays ?? []) as VisualOverlay[]).map(stripImageUrl),
   };
+}
+
+/** Strip runtime-only url field from image overlays (not persisted). */
+function stripImageUrl(overlay: VisualOverlay): VisualOverlay {
+  if (overlay.type === 'image') {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { url: _url, ...rest } = overlay;
+    return rest as VisualOverlay;
+  }
+  return overlay;
 }
 
 function generateId(): string {

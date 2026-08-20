@@ -34,6 +34,13 @@ import {
 import { PRESETS, getPresetNames, applyPreset, loadCustomPresets, saveCustomPreset, deleteCustomPreset, applyCustomPreset, type CustomPreset } from '@/lib/preset-utils';
 import { selectTextOverlaysForExport } from '@/lib/text-overlay-utils';
 import { computeTransitionAdjustedDuration, type TransitionClip } from '@/lib/transition-utils';
+import {
+  type SubtitleCue, type VisualOverlay, type DrawingOverlay, type ImageOverlay,
+  createDefaultSubtitleCue, createDefaultDrawingOverlay, createDefaultRectangleOverlay,
+  createDefaultImageOverlay, normalizeDrawingPoints, computeDrawingBounds,
+  rebaseDrawingPoints, getActiveTtsCue, computeOverlayCssTransform,
+} from '@/lib/visual-overlay-utils';
+import { renderOverlaysToPng } from '@/lib/overlay-renderer';
 import '@/lib/i18n';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -70,12 +77,15 @@ export interface EditorState {
   textOverlays: TextOverlay[];
   backgroundMusic: { name: string; file?: File; url?: string; volume: number; loop: boolean; fadeIn: number; fadeOut: number } | null;
   presetName: string | null;
+  subtitles: SubtitleCue[];
+  visualOverlays: VisualOverlay[];
 }
 
-type InspectorTab = 'clip' | 'project' | 'audio' | 'effects';
+type InspectorTab = 'clip' | 'project' | 'audio' | 'effects' | 'subtitles';
 type MobilePanel = 'media' | 'inspector' | null;
 type Toast = { kind: 'success' | 'error'; message: string } | null;
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+type OverlayTool = 'select' | 'pen' | 'rect';
 
 const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   resolution: '720p', frameRate: 30, quality: 'balanced', rangeStart: 0, rangeEnd: null,
@@ -88,6 +98,7 @@ const DEFAULT_STATE: EditorState = {
   masterVolume: 100, canvasAspect: '16:9', canvasFit: 'contain',
   playbackSpeed: 1, transitions: [], textOverlays: [],
   backgroundMusic: null, presetName: null,
+  subtitles: [], visualOverlays: [],
 };
 const iconButton = 'rounded-md p-2 text-[var(--muted)] transition hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-30';
 
@@ -165,6 +176,11 @@ function fileIdentity(file: File) {
   return `${file.name}::${file.size}::${file.lastModified}`;
 }
 
+function clampNumber(value: string | number, min: number, max: number, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+}
+
 function clipToExtendedMetadata(clip: Clip, filename: string, hasAudio: boolean): ExtendedClipMetadata {
   return {
     id: clip.id, filename, trimStart: clip.trimStart, trimEnd: clip.trimEnd, hasAudio,
@@ -202,6 +218,8 @@ function editorStateToDraft(state: EditorState): DraftState {
       file: state.backgroundMusic.file,
     } : null,
     presetName: state.presetName,
+    subtitles: state.subtitles,
+    visualOverlays: state.visualOverlays,
   });
 }
 
@@ -216,6 +234,13 @@ function draftToEditorState(draft: DraftState, createUrl: (file: Blob) => string
       rotation: c.rotation ?? 0, flipH: c.flipH ?? false, flipV: c.flipV ?? false,
       speed: c.speed ?? 1.0, displayName: c.displayName ?? c.name,
     }));
+  // Restore object URLs for image overlays that have a File
+  const visualOverlays: VisualOverlay[] = (draft.visualOverlays ?? []).map((o) => {
+    if (o.type === 'image' && o.file instanceof Blob) {
+      return { ...o, url: createUrl(o.file) } as VisualOverlay;
+    }
+    return o;
+  });
   return {
     clips,
     activeClipId: clips.some((c) => c.id === draft.activeClipId) ? draft.activeClipId : (clips[0]?.id ?? null),
@@ -235,6 +260,8 @@ function draftToEditorState(draft: DraftState, createUrl: (file: Blob) => string
       url: draft.backgroundMusic.file instanceof Blob ? createUrl(draft.backgroundMusic.file as File) : undefined,
     } : null,
     presetName: draft.presetName ?? null,
+    subtitles: (draft.subtitles ?? []) as SubtitleCue[],
+    visualOverlays,
   };
 }
 
@@ -272,6 +299,14 @@ export default function Editor() {
   const [renamingClipId, setRenamingClipId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
 
+  // Subtitle/overlay state
+  const [editingSubtitleId, setEditingSubtitleId] = useState<string | null>(null);
+  const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
+  const [overlayTool, setOverlayTool] = useState<OverlayTool>('select');
+  const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [ttsPlaying, setTtsPlaying] = useState(false);
+  const ttsSupported = typeof window !== 'undefined' && typeof window.speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined';
+
   // Project manager state
   const [projects, setProjects] = useState<DraftProject[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
@@ -282,6 +317,7 @@ export default function Editor() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const exportDialogRef = useRef<HTMLDivElement>(null);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
   const previewContainerRef = useRef<HTMLDivElement>(null);
@@ -297,6 +333,13 @@ export default function Editor() {
   const pendingSeekRef = useRef<{ clipId: string; sourceTime: number } | null>(null);
   const savingRef = useRef(false);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const drawingRef = useRef<{ points: Array<{ x: number; y: number }>; active: boolean }>({ points: [], active: false });
+  const rectDrawRef = useRef<{ startX: number; startY: number; active: boolean }>({ startX: 0, startY: 0, active: false });
+  const [draftPenPoints, setDraftPenPoints] = useState<Array<{ x: number; y: number }>>([]);
+  const [draftRect, setDraftRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const ttsUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const ttsModeRef = useRef<'auto' | 'manual' | null>(null);
+  const lastTtsCueIdRef = useRef<string | null>(null);
 
   const activeClip = state.clips.find((clip) => clip.id === state.activeClipId);
   const projectDurationSpeedAware = getProjectDurationSpeedAware(state.clips);
@@ -311,6 +354,10 @@ export default function Editor() {
   const canSplit = Boolean(activeClip
     && currentTime - activeClip.trimStart >= 0.01
     && activeClip.trimEnd - currentTime >= 0.01);
+
+  const previewProjectTime = activeClip
+    ? (projectTimeForClipSpeedAware(state.clips, activeClip.id, currentTime) ?? 0)
+    : 0;
 
   const createTrackedUrl = useCallback((file: Blob) => {
     const url = URL.createObjectURL(file);
@@ -328,6 +375,61 @@ export default function Editor() {
   useEffect(() => {
     document.documentElement.lang = i18n.resolvedLanguage?.startsWith('zh') ? 'zh-CN' : 'en';
   }, [i18n.resolvedLanguage]);
+
+  // TTS: Load available voices, detect support
+  useEffect(() => {
+    if (!ttsSupported) return;
+    const loadVoices = () => { setTtsVoices(window.speechSynthesis?.getVoices() ?? []); };
+    loadVoices();
+    window.speechSynthesis?.addEventListener('voiceschanged', loadVoices);
+    return () => { window.speechSynthesis?.removeEventListener('voiceschanged', loadVoices); };
+  }, [ttsSupported]);
+
+  // TTS: Auto-play when playback enters a cue with TTS enabled.
+  useEffect(() => {
+    if (!ttsSupported) return;
+    const activeCue = isPlaying ? getActiveTtsCue(state.subtitles, previewProjectTime) : null;
+    if (!activeCue?.tts || !activeCue.text.trim()) {
+      if (ttsModeRef.current === 'auto') {
+        window.speechSynthesis.cancel();
+        ttsModeRef.current = null;
+        setTtsPlaying(false);
+      }
+      lastTtsCueIdRef.current = null;
+      return;
+    }
+    if (activeCue.id === lastTtsCueIdRef.current) return;
+
+    lastTtsCueIdRef.current = activeCue.id;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(activeCue.text);
+    const voice = ttsVoices.find((candidate) => candidate.voiceURI === activeCue.tts!.voiceURI);
+    if (voice) utterance.voice = voice;
+    utterance.lang = activeCue.tts.lang || voice?.lang || '';
+    utterance.rate = activeCue.tts.rate;
+    utterance.pitch = activeCue.tts.pitch;
+    utterance.volume = activeCue.tts.volume;
+    utterance.onend = () => { ttsModeRef.current = null; setTtsPlaying(false); };
+    utterance.onerror = () => { ttsModeRef.current = null; setTtsPlaying(false); };
+    ttsUtteranceRef.current = utterance;
+    ttsModeRef.current = 'auto';
+    window.speechSynthesis.speak(utterance);
+    setTtsPlaying(true);
+  }, [isPlaying, previewProjectTime, state.subtitles, ttsSupported, ttsVoices]);
+
+  // A project switch always terminates speech from the previous project.
+  useEffect(() => {
+    if (!ttsSupported) return;
+    window.speechSynthesis.cancel();
+    ttsModeRef.current = null;
+    lastTtsCueIdRef.current = null;
+    const timer = window.setTimeout(() => setTtsPlaying(false), 0);
+    return () => window.clearTimeout(timer);
+  }, [currentProjectId, ttsSupported]);
+
+  useEffect(() => () => {
+    if (ttsSupported) window.speechSynthesis.cancel();
+  }, [ttsSupported]);
 
   // Initialize: migrate from v1, load projects
   useEffect(() => {
@@ -771,6 +873,25 @@ export default function Editor() {
       }
 
       // Use buildFFmpegCommandExtended with all new features
+      // Render visual overlays AND subtitles to PNGs
+      const overlayPngs: import('@/lib/ffmpeg-utils').PngOverlayInput[] = [];
+      if (state.visualOverlays.length > 0 || state.subtitles.length > 0) {
+        const { computeCanvasDimensions } = await import('@/lib/editor-utils');
+        const canvasDims = computeCanvasDimensions(state.canvasAspect, state.exportSettings.resolution);
+        const rendered = await renderOverlaysToPng(state.visualOverlays, {
+          width: canvasDims.width,
+          height: canvasDims.height,
+          rangeStart: effectiveStart,
+          rangeEnd: effectiveEnd,
+        }, state.subtitles);
+        for (const png of rendered) {
+          if (cancelRequestedRef.current) return;
+          await engine.writeFile(png.filename, png.data);
+          temporaryFiles.push(png.filename);
+          overlayPngs.push({ filename: png.filename, startTime: png.startTime, endTime: png.endTime });
+        }
+      }
+
       const exitCode = await engine.exec(
         buildFFmpegCommandExtended(
           metadata,
@@ -785,6 +906,8 @@ export default function Editor() {
           state.transitions,
           exportTextOverlays,
           bgMusicExport,
+          undefined,
+          overlayPngs,
         ),
       );
       if (exitCode !== 0) throw new Error(`FFmpeg exited with code ${exitCode}`);
@@ -1083,6 +1206,192 @@ export default function Editor() {
     if (editingTextId === id) setEditingTextId(null);
   }, [editingTextId, updateState]);
 
+  // ─── Subtitle CRUD ───────────────────────────────────────────────────────
+
+  const addSubtitle = useCallback(() => {
+    const cue = createDefaultSubtitleCue(previewProjectTime);
+    updateState((current) => ({
+      ...current,
+      subtitles: [...current.subtitles, cue],
+    }));
+    setEditingSubtitleId(cue.id);
+  }, [previewProjectTime, updateState]);
+
+  const updateSubtitle = useCallback((id: string, updates: Partial<SubtitleCue>) => {
+    replaceState((current) => ({
+      ...current,
+      subtitles: current.subtitles.map((s) => s.id === id ? { ...s, ...updates } : s),
+    }));
+  }, [replaceState]);
+
+  const removeSubtitle = useCallback((id: string) => {
+    updateState((current) => ({
+      ...current,
+      subtitles: current.subtitles.filter((s) => s.id !== id),
+    }));
+    if (editingSubtitleId === id) setEditingSubtitleId(null);
+  }, [editingSubtitleId, updateState]);
+
+  // ─── Visual Overlay CRUD ─────────────────────────────────────────────────
+
+  const addVisualOverlay = useCallback((overlay: VisualOverlay) => {
+    updateState((current) => ({
+      ...current,
+      visualOverlays: [...current.visualOverlays, overlay],
+    }));
+    setSelectedOverlayId(overlay.id);
+  }, [updateState]);
+
+  const updateVisualOverlay = useCallback((id: string, updates: Partial<VisualOverlay>) => {
+    replaceState((current) => ({
+      ...current,
+      visualOverlays: current.visualOverlays.map((o) => o.id === id ? { ...o, ...updates } as VisualOverlay : o),
+    }));
+  }, [replaceState]);
+
+  const removeVisualOverlay = useCallback((id: string) => {
+    updateState((current) => ({
+      ...current,
+      visualOverlays: current.visualOverlays.filter((o) => o.id !== id),
+    }));
+    if (selectedOverlayId === id) setSelectedOverlayId(null);
+  }, [selectedOverlayId, updateState]);
+
+  // ─── Image Import for Overlays ───────────────────────────────────────────
+
+  const importImageOverlay = useCallback((file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    const url = createTrackedUrl(file);
+    const overlay = createDefaultImageOverlay(previewProjectTime);
+    (overlay as ImageOverlay).file = file;
+    (overlay as ImageOverlay).url = url;
+    addVisualOverlay(overlay);
+  }, [addVisualOverlay, createTrackedUrl, previewProjectTime]);
+
+  // ─── Drawing Pointer Handlers ────────────────────────────────────────────
+
+  const handlePreviewPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (overlayTool === 'pen') {
+      drawingRef.current = { points: [{ x, y }], active: true };
+      setDraftPenPoints([{ x: (x / rect.width) * 100, y: (y / rect.height) * 100 }]);
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } else if (overlayTool === 'rect') {
+      rectDrawRef.current = { startX: x, startY: y, active: true };
+      setDraftRect({ x: (x / rect.width) * 100, y: (y / rect.height) * 100, w: 0, h: 0 });
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+  }, [overlayTool]);
+
+  const handlePreviewPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    if (overlayTool === 'pen' && drawingRef.current.active) {
+      drawingRef.current.points.push({ x: cx, y: cy });
+      setDraftPenPoints((prev) => [...prev, { x: (cx / rect.width) * 100, y: (cy / rect.height) * 100 }]);
+    } else if (overlayTool === 'rect' && rectDrawRef.current.active) {
+      const sx = rectDrawRef.current.startX;
+      const sy = rectDrawRef.current.startY;
+      setDraftRect({
+        x: (Math.min(sx, cx) / rect.width) * 100,
+        y: (Math.min(sy, cy) / rect.height) * 100,
+        w: (Math.abs(cx - sx) / rect.width) * 100,
+        h: (Math.abs(cy - sy) / rect.height) * 100,
+      });
+    }
+  }, [overlayTool]);
+
+  const handlePreviewPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+
+    if (overlayTool === 'pen' && drawingRef.current.active) {
+      drawingRef.current.active = false;
+      const rawPoints = drawingRef.current.points;
+      if (rawPoints.length >= 2) {
+        // Normalize raw pixel coords to 0..1 over entire preview
+        const normalized = normalizeDrawingPoints(rawPoints, w, h);
+        const bounds = computeDrawingBounds(normalized);
+        // Rebase to local overlay-relative 0..1 coords within the bounding box
+        const localPoints = rebaseDrawingPoints(normalized, bounds);
+        const overlay = createDefaultDrawingOverlay(previewProjectTime);
+        overlay.points = localPoints;
+        overlay.position = {
+          x: ((bounds.minX + bounds.maxX) / 2) * 100,
+          y: ((bounds.minY + bounds.maxY) / 2) * 100,
+        };
+        overlay.size = {
+          w: Math.max(5, (bounds.maxX - bounds.minX) * 100),
+          h: Math.max(5, (bounds.maxY - bounds.minY) * 100),
+        };
+        addVisualOverlay(overlay);
+      }
+      drawingRef.current.points = [];
+      setDraftPenPoints([]);
+    } else if (overlayTool === 'rect' && rectDrawRef.current.active) {
+      rectDrawRef.current.active = false;
+      const sx = rectDrawRef.current.startX;
+      const sy = rectDrawRef.current.startY;
+      const ex = e.clientX - rect.left;
+      const ey = e.clientY - rect.top;
+      const rectW = Math.abs(ex - sx);
+      const rectH = Math.abs(ey - sy);
+      if (rectW > 5 && rectH > 5) {
+        const overlay = createDefaultRectangleOverlay(previewProjectTime);
+        overlay.position = {
+          x: ((Math.min(sx, ex) + rectW / 2) / w) * 100,
+          y: ((Math.min(sy, ey) + rectH / 2) / h) * 100,
+        };
+        overlay.size = { w: (rectW / w) * 100, h: (rectH / h) * 100 };
+        addVisualOverlay(overlay);
+      }
+      setDraftRect(null);
+    }
+  }, [addVisualOverlay, overlayTool, previewProjectTime]);
+
+  /** Handle pointer cancel / lost capture to avoid stuck drawing state */
+  const handlePreviewPointerCancel = useCallback(() => {
+    if (drawingRef.current.active) {
+      drawingRef.current.active = false;
+      drawingRef.current.points = [];
+      setDraftPenPoints([]);
+    }
+    if (rectDrawRef.current.active) {
+      rectDrawRef.current.active = false;
+      setDraftRect(null);
+    }
+  }, []);
+
+  // ─── TTS Manual Preview ──────────────────────────────────────────────────
+
+  const previewTts = useCallback((cue: SubtitleCue) => {
+    if (!cue.tts || !ttsSupported || !cue.text.trim()) return;
+    window.speechSynthesis?.cancel();
+    const utterance = new SpeechSynthesisUtterance(cue.text);
+    const voice = ttsVoices.find((v) => v.voiceURI === cue.tts!.voiceURI);
+    if (voice) utterance.voice = voice;
+    utterance.lang = cue.tts.lang || '';
+    utterance.rate = cue.tts.rate;
+    utterance.pitch = cue.tts.pitch;
+    utterance.volume = cue.tts.volume;
+    utterance.onend = () => { ttsModeRef.current = null; setTtsPlaying(false); };
+    utterance.onerror = () => { ttsModeRef.current = null; setTtsPlaying(false); };
+    ttsUtteranceRef.current = utterance;
+    ttsModeRef.current = 'manual';
+    window.speechSynthesis.speak(utterance);
+    setTtsPlaying(true);
+  }, [ttsVoices, ttsSupported]);
+
+  const stopTts = useCallback(() => {
+    window.speechSynthesis?.cancel();
+    ttsModeRef.current = null;
+    setTtsPlaying(false);
+  }, []);
+
   // ─── Preview CSS ─────────────────────────────────────────────────────────
 
   // H5: Compute preview aspect ratio and fit mode CSS
@@ -1103,10 +1412,6 @@ export default function Editor() {
     objectFit: previewFit,
   };
 
-  const previewProjectTime = activeClip
-    ? (projectTimeForClipSpeedAware(state.clips, activeClip.id, currentTime) ?? 0)
-    : 0;
-
   const processingLabel = processingStage === 'loading'
     ? t('loading_engine')
     : processingStage === 'preparing' ? t('preparing_media') : t('exporting');
@@ -1117,6 +1422,7 @@ export default function Editor() {
     <div className="flex h-dvh min-h-[560px] flex-col overflow-hidden bg-[var(--app)] text-[var(--text)]">
       <input ref={fileInputRef} type="file" accept="video/*" multiple className="sr-only" onChange={(event) => { void importFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
       <input ref={audioInputRef} type="file" accept="audio/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) void importBackgroundAudio(f); event.target.value = ''; }} />
+      <input ref={imageInputRef} type="file" accept="image/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) importImageOverlay(f); event.target.value = ''; }} aria-label={t('add_image')} />
 
       {/* ─── Header ──────────────────────────────────────────────────────── */}
       <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--panel)] px-3 sm:px-4">
@@ -1225,7 +1531,15 @@ export default function Editor() {
                 <span className="text-center"><strong className="block text-sm">{t('upload_media')}</strong><span className="mt-1 block text-xs text-[var(--muted)]">{t('drop_here')}</span></span>
               </button>
             ) : (
-              <div className="relative flex w-full max-w-3xl touch-manipulation items-center justify-center overflow-hidden rounded-xl border border-[var(--border)] bg-black shadow-2xl" style={{ aspectRatio: previewAspectRatio }}>
+              <div
+                className={`relative flex w-full max-w-3xl items-center justify-center overflow-hidden rounded-xl border border-[var(--border)] bg-black shadow-2xl ${overlayTool !== 'select' ? 'cursor-crosshair' : ''}`}
+                style={{ aspectRatio: previewAspectRatio, touchAction: overlayTool !== 'select' ? 'none' : undefined }}
+                onPointerDown={overlayTool !== 'select' ? handlePreviewPointerDown : undefined}
+                onPointerMove={overlayTool !== 'select' ? handlePreviewPointerMove : undefined}
+                onPointerUp={overlayTool !== 'select' ? handlePreviewPointerUp : undefined}
+                onPointerCancel={overlayTool !== 'select' ? handlePreviewPointerCancel : undefined}
+                onLostPointerCapture={overlayTool !== 'select' ? handlePreviewPointerCancel : undefined}
+              >
                 <video
                   key={activeClip.id} ref={videoRef} src={activeClip.url} playsInline
                   muted={activeClip.muted}
@@ -1261,7 +1575,7 @@ export default function Editor() {
                       }
                     }
                   }}
-                  onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onClick={togglePlay}
+                  onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onClick={overlayTool === 'select' ? togglePlay : undefined}
                 />
                 {/* Text overlay preview */}
                 {state.textOverlays.map((overlay) => {
@@ -1278,7 +1592,112 @@ export default function Editor() {
                     }}>{overlay.text}</span>
                   );
                 })}
+                {/* Subtitle preview */}
+                {state.subtitles.map((cue) => {
+                  const visible = previewProjectTime >= cue.startTime && previewProjectTime < cue.endTime;
+                  if (!visible) return null;
+                  return (
+                    <div key={cue.id} className={`absolute z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                      style={{
+                        left: `${cue.position.x}%`, top: `${cue.position.y}%`,
+                        width: `${cue.width}%`, maxWidth: '90%',
+                        transform: computeOverlayCssTransform(cue.position, cue.rotation),
+                        fontSize: `${cue.fontSize * 0.5}px`,
+                        lineHeight: String(cue.lineHeight || 1.3),
+                        color: cue.color,
+                        backgroundColor: cue.backgroundColor || undefined,
+                        fontFamily: cue.fontFamily === 'mono' ? 'monospace' : cue.fontFamily === 'serif' ? 'serif' : 'sans-serif',
+                        textAlign: cue.align,
+                        textShadow: cue.backgroundColor ? undefined : '0 2px 4px rgba(0,0,0,0.7)',
+                        whiteSpace: 'pre-wrap',
+                        wordWrap: 'break-word',
+                        padding: '2px 4px',
+                        borderRadius: '2px',
+                        outline: editingSubtitleId === cue.id ? '2px solid #6366f1' : undefined,
+                      }}
+                      onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); setEditingSubtitleId(cue.id); setInspectorTab('subtitles'); } }}
+                    >{cue.text || '…'}</div>
+                  );
+                })}
+                {/* Visual overlay preview */}
+                {state.visualOverlays.map((overlay) => {
+                  const visible = previewProjectTime >= overlay.startTime && previewProjectTime < overlay.endTime;
+                  if (!visible) return null;
+                  const overlayStyle: React.CSSProperties = {
+                    position: 'absolute',
+                    left: `${overlay.position.x}%`,
+                    top: `${overlay.position.y}%`,
+                    width: `${overlay.size.w}%`,
+                    height: `${overlay.size.h}%`,
+                    transform: computeOverlayCssTransform(overlay.position, overlay.rotation),
+                    opacity: overlay.opacity,
+                    outline: selectedOverlayId === overlay.id ? '2px solid #6366f1' : undefined,
+                  };
+                  if (overlay.type === 'rectangle') {
+                    return (
+                      <div key={overlay.id} className={`z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                        style={{
+                          ...overlayStyle,
+                          border: overlay.strokeWidth > 0 ? `${overlay.strokeWidth}px solid ${overlay.strokeColor}` : undefined,
+                          backgroundColor: overlay.fillColor || undefined,
+                          borderRadius: `${overlay.borderRadius}px`,
+                        }}
+                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); setSelectedOverlayId(overlay.id); setInspectorTab('subtitles'); } }}
+                      />
+                    );
+                  }
+                  if (overlay.type === 'image' && (overlay as ImageOverlay).url) {
+                    return (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img key={overlay.id} src={(overlay as ImageOverlay).url} alt=""
+                        className={`z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                        style={overlayStyle}
+                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); setSelectedOverlayId(overlay.id); setInspectorTab('subtitles'); } }}
+                      />
+                    );
+                  }
+                  if (overlay.type === 'drawing') {
+                    return (
+                      <svg key={overlay.id}
+                        className={`z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                        style={overlayStyle} viewBox="0 0 100 100" preserveAspectRatio="none"
+                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); setSelectedOverlayId(overlay.id); setInspectorTab('subtitles'); } }}
+                      >
+                        <polyline
+                          points={(overlay as DrawingOverlay).points.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')}
+                          fill="none"
+                          stroke={(overlay as DrawingOverlay).strokeColor}
+                          strokeWidth={(overlay as DrawingOverlay).strokeWidth}
+                          strokeLinecap="round" strokeLinejoin="round"
+                        />
+                      </svg>
+                    );
+                  }
+                  return null;
+                })}
                 <span className="absolute left-3 top-3 z-20 rounded bg-black/70 px-2 py-1 font-mono text-[10px] text-white" aria-live="off">{currentTime.toFixed(2)}s / {activeClip.duration.toFixed(2)}s</span>
+                {/* Draft pen/rect drawing preview */}
+                {draftPenPoints.length >= 2 && (
+                  <svg className="pointer-events-none absolute inset-0 z-25 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+                    <polyline
+                      points={draftPenPoints.map((p) => `${p.x},${p.y}`).join(' ')}
+                      fill="none" stroke="#ff0000" strokeWidth="0.3" strokeLinecap="round" strokeLinejoin="round" opacity="0.7"
+                    />
+                  </svg>
+                )}
+                {draftRect && draftRect.w > 0 && draftRect.h > 0 && (
+                  <div className="pointer-events-none absolute z-25" style={{
+                    left: `${draftRect.x}%`, top: `${draftRect.y}%`,
+                    width: `${draftRect.w}%`, height: `${draftRect.h}%`,
+                    border: '2px dashed #ff0000', opacity: 0.7,
+                  }} />
+                )}
+                {/* Overlay tool indicator */}
+                {overlayTool !== 'select' && (
+                  <span className="absolute left-3 bottom-3 z-30 rounded bg-indigo-600/90 px-2 py-1 text-[10px] text-white" role="status">
+                    {overlayTool === 'pen' ? t('drawing_mode') : t('rect_mode')}
+                  </span>
+                )}
                 {/* Fullscreen button */}
                 <button onClick={toggleFullscreen} className="absolute right-3 top-3 z-20 rounded bg-black/50 p-1.5 text-white/80 hover:text-white" aria-label={isFullscreen ? t('exit_fullscreen') : t('fullscreen')}>
                   {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
@@ -1314,7 +1733,7 @@ export default function Editor() {
         <aside className={`fixed inset-x-0 bottom-0 z-30 flex max-h-[70dvh] flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--panel)] transition-transform lg:static lg:inset-auto lg:max-h-none lg:w-72 lg:rounded-none lg:border-l lg:border-t-0 ${mobilePanel === 'inspector' ? 'translate-y-0' : 'translate-y-full lg:translate-y-0'}`} aria-label={t('inspector')} role={mobilePanel === 'inspector' ? 'dialog' : undefined} aria-modal={mobilePanel === 'inspector' ? true : undefined}>
           {/* Tab Bar */}
           <div className="flex h-11 shrink-0 items-center border-b border-[var(--border)] px-1">
-            {(['clip', 'project', 'audio', 'effects'] as const).map((tab) => (
+            {(['clip', 'project', 'audio', 'effects', 'subtitles'] as const).map((tab) => (
               <button key={tab} onClick={() => setInspectorTab(tab)} className={`flex-1 px-1 py-2 text-[10px] font-medium transition ${inspectorTab === tab ? 'border-b-2 border-indigo-500 text-indigo-500' : 'text-[var(--muted)] hover:text-[var(--text)]'}`} aria-current={inspectorTab === tab ? 'page' : undefined}>{t(`tab_${tab}`)}</button>
             ))}
             <button onClick={() => setMobilePanel(null)} className={`${iconButton} lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
@@ -1562,18 +1981,177 @@ export default function Editor() {
                                 <option value="serif">{t('font_serif')}</option>
                                 <option value="mono">{t('font_mono')}</option>
                               </select>
-                              <input type="number" min={12} max={200} value={overlay.fontSize} onChange={(e) => updateTextOverlay(overlay.id, { fontSize: Number(e.target.value) || 48 })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('font_size')} />
+                              <input type="number" min={12} max={200} value={overlay.fontSize} onChange={(e) => updateTextOverlay(overlay.id, { fontSize: clampNumber(e.target.value, 12, 200, 48) })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('font_size')} />
                             </div>
                             <div className="grid grid-cols-2 gap-2">
                               <input type="color" value={overlay.color} onChange={(e) => updateTextOverlay(overlay.id, { color: e.target.value })} className="h-7 w-full rounded border border-[var(--border)]" aria-label={t('text_color')} />
                               <div className="flex gap-1">
-                                <input type="number" min={0} max={100} value={overlay.position.x} onChange={(e) => updateTextOverlay(overlay.id, { position: { ...overlay.position, x: Number(e.target.value) || 0 } })} className="w-1/2 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_x')} />
-                                <input type="number" min={0} max={100} value={overlay.position.y} onChange={(e) => updateTextOverlay(overlay.id, { position: { ...overlay.position, y: Number(e.target.value) || 0 } })} className="w-1/2 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_y')} />
+                                <input type="number" min={0} max={100} value={overlay.position.x} onChange={(e) => updateTextOverlay(overlay.id, { position: { ...overlay.position, x: clampNumber(e.target.value, 0, 100, overlay.position.x) } })} className="w-1/2 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_x')} />
+                                <input type="number" min={0} max={100} value={overlay.position.y} onChange={(e) => updateTextOverlay(overlay.id, { position: { ...overlay.position, y: clampNumber(e.target.value, 0, 100, overlay.position.y) } })} className="w-1/2 rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_y')} />
                               </div>
                             </div>
                             <div className="grid grid-cols-2 gap-2">
                               <input type="number" min={0} step={0.1} value={overlay.startTime} onChange={(e) => updateTextOverlay(overlay.id, { startTime: Number(e.target.value) || 0 })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_start')} />
                               <input type="number" min={0} step={0.1} value={overlay.endTime} onChange={(e) => updateTextOverlay(overlay.id, { endTime: Number(e.target.value) || 5 })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('text_end')} />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </>
+            )}
+
+            {/* ── Subtitles & Overlays Tab ─────────────────────────────── */}
+            {inspectorTab === 'subtitles' && (
+              <>
+                {/* Overlay tool bar */}
+                <section aria-labelledby="overlay-tools-heading">
+                  <h2 id="overlay-tools-heading" className="mb-2 text-xs font-medium">{t('visual_overlays')}</h2>
+                  <div className="flex gap-1 mb-3">
+                    <button onClick={() => setOverlayTool('select')} className={`rounded border px-2 py-1 text-[10px] ${overlayTool === 'select' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{t('overlay_select')}</button>
+                    <button onClick={() => setOverlayTool('pen')} className={`rounded border px-2 py-1 text-[10px] ${overlayTool === 'pen' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{t('overlay_pen')}</button>
+                    <button onClick={() => setOverlayTool('rect')} className={`rounded border px-2 py-1 text-[10px] ${overlayTool === 'rect' ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-[var(--border)] text-[var(--muted)]'}`}>{t('overlay_rect_tool')}</button>
+                    <button onClick={() => imageInputRef.current?.click()} className="rounded border border-[var(--border)] px-2 py-1 text-[10px] text-[var(--muted)] hover:border-indigo-500 hover:text-indigo-500">{t('add_image')}</button>
+                  </div>
+                  {/* Overlay list */}
+                  {state.visualOverlays.length === 0 && <p className="text-[10px] text-[var(--muted)] mb-3">{t('no_overlays')}</p>}
+                  {state.visualOverlays.map((overlay) => (
+                    <div key={overlay.id} className={`mb-2 rounded border p-2 ${selectedOverlayId === overlay.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
+                      <div className="flex items-center justify-between mb-1">
+                        <button onClick={() => setSelectedOverlayId(selectedOverlayId === overlay.id ? null : overlay.id)} className="text-[11px] text-indigo-500 hover:underline capitalize">{overlay.type}</button>
+                        <button onClick={() => removeVisualOverlay(overlay.id)} className="text-red-500 hover:text-red-400" aria-label={t('remove_overlay')}><Trash2 className="h-3 w-3" /></button>
+                      </div>
+                      {selectedOverlayId === overlay.id && (
+                        <div className="mt-2 space-y-2">
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_x')}<input type="number" min={0} max={100} step={1} value={Math.round(overlay.position.x)} onChange={(e) => updateVisualOverlay(overlay.id, { position: { ...overlay.position, x: clampNumber(e.target.value, 0, 100, overlay.position.x) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_y')}<input type="number" min={0} max={100} step={1} value={Math.round(overlay.position.y)} onChange={(e) => updateVisualOverlay(overlay.id, { position: { ...overlay.position, y: clampNumber(e.target.value, 0, 100, overlay.position.y) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_width')}<input type="number" min={1} max={100} step={1} value={Math.round(overlay.size.w)} onChange={(e) => updateVisualOverlay(overlay.id, { size: { ...overlay.size, w: clampNumber(e.target.value, 1, 100, overlay.size.w) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_height')}<input type="number" min={1} max={100} step={1} value={Math.round(overlay.size.h)} onChange={(e) => updateVisualOverlay(overlay.id, { size: { ...overlay.size, h: clampNumber(e.target.value, 1, 100, overlay.size.h) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_rotation')}<input type="number" min={-360} max={360} step={1} value={overlay.rotation} onChange={(e) => updateVisualOverlay(overlay.id, { rotation: clampNumber(e.target.value, -360, 360, 0) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_opacity')}<input type="number" min={0} max={1} step={0.1} value={overlay.opacity} onChange={(e) => updateVisualOverlay(overlay.id, { opacity: clampNumber(e.target.value, 0, 1, overlay.opacity) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_start')}<input type="number" min={0} max={Math.max(0, overlay.endTime - 0.1)} step={0.1} value={overlay.startTime} onChange={(e) => { const v = Math.max(0, Math.min(overlay.endTime - 0.01, Number(e.target.value) || 0)); updateVisualOverlay(overlay.id, { startTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            <label className="text-[10px] text-[var(--muted)]">{t('overlay_end')}<input type="number" min={overlay.startTime + 0.01} step={0.1} value={overlay.endTime} onChange={(e) => { const v = Math.max(overlay.startTime + 0.01, Number(e.target.value) || overlay.startTime + 1); updateVisualOverlay(overlay.id, { endTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                          </div>
+                          {(overlay.type === 'rectangle' || overlay.type === 'drawing') && (
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="text-[10px] text-[var(--muted)]">{t('overlay_stroke')}<input type="color" value={(overlay as DrawingOverlay).strokeColor || '#ff0000'} onChange={(e) => updateVisualOverlay(overlay.id, { strokeColor: e.target.value } as Partial<VisualOverlay>)} className="h-6 w-full rounded border border-[var(--border)]" /></label>
+                              {overlay.type === 'rectangle' && (
+                                <label className="text-[10px] text-[var(--muted)]">{t('overlay_fill')}<span className="flex gap-0.5"><input type="color" value={(overlay as import('@/lib/visual-overlay-utils').RectangleOverlay).fillColor || '#000000'} onChange={(e) => updateVisualOverlay(overlay.id, { fillColor: e.target.value } as Partial<VisualOverlay>)} className="h-6 flex-1 rounded border border-[var(--border)]" /><button type="button" onClick={() => updateVisualOverlay(overlay.id, { fillColor: '' } as Partial<VisualOverlay>)} className="rounded border border-[var(--border)] px-1 text-[8px] text-[var(--muted)] hover:text-red-500" title={t('clear_fill')}>✕</button></span></label>
+                              )}
+                              <label className="text-[10px] text-[var(--muted)]">{t('overlay_line_width')}<input type="number" min={0} max={20} step={0.5} value={(overlay as DrawingOverlay).strokeWidth ?? 2} onChange={(e) => updateVisualOverlay(overlay.id, { strokeWidth: clampNumber(e.target.value, 0, 20, (overlay as DrawingOverlay).strokeWidth ?? 2) } as Partial<VisualOverlay>)} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </section>
+
+                {/* Subtitles */}
+                <section aria-labelledby="subtitles-heading">
+                  <div className="mb-3 flex items-center justify-between">
+                    <h2 id="subtitles-heading" className="text-xs font-medium">{t('subtitles')}</h2>
+                    <button onClick={addSubtitle} className="flex items-center gap-1 rounded px-2 py-1 text-[10px] text-indigo-500 hover:bg-indigo-500/10"><Plus className="h-3 w-3" />{t('add_subtitle')}</button>
+                  </div>
+                  <p className="text-[9px] text-amber-600 dark:text-amber-400 mb-2" role="note">{t('tts_notice')}</p>
+                  {!ttsSupported && <p className="text-[9px] text-red-500 mb-2" role="alert">{t('tts_unsupported')}</p>}
+                  <div className="space-y-2">
+                    {state.subtitles.map((cue) => (
+                      <div key={cue.id} className={`rounded border p-2 ${editingSubtitleId === cue.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <button onClick={() => setEditingSubtitleId(editingSubtitleId === cue.id ? null : cue.id)} className="text-[11px] text-indigo-500 hover:underline truncate flex-1 text-left">{cue.text || t('subtitle_text')}</button>
+                          <button onClick={() => removeSubtitle(cue.id)} className="text-red-500 hover:text-red-400" aria-label={t('remove_subtitle')}><Trash2 className="h-3 w-3" /></button>
+                        </div>
+                        {editingSubtitleId === cue.id && (
+                          <div className="mt-2 space-y-2">
+                            {/* Multiline text */}
+                            <textarea
+                              value={cue.text}
+                              onChange={(e) => updateSubtitle(cue.id, { text: e.target.value })}
+                              rows={3}
+                              className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-2 py-1 text-[11px] resize-y"
+                              placeholder={t('subtitle_text')}
+                            />
+                            {/* Font / Size / Align */}
+                            <div className="grid grid-cols-3 gap-1.5">
+                              <select value={cue.fontFamily} onChange={(e) => updateSubtitle(cue.id, { fontFamily: e.target.value as 'sans' | 'serif' | 'mono' })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px]" aria-label={t('subtitle_font')}>
+                                <option value="sans">{t('font_sans')}</option>
+                                <option value="serif">{t('font_serif')}</option>
+                                <option value="mono">{t('font_mono')}</option>
+                              </select>
+                              <input type="number" min={12} max={200} value={cue.fontSize} onChange={(e) => updateSubtitle(cue.id, { fontSize: clampNumber(e.target.value, 12, 200, 48) })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" aria-label={t('subtitle_size')} />
+                              <select value={cue.align} onChange={(e) => updateSubtitle(cue.id, { align: e.target.value as 'left' | 'center' | 'right' })} className="rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px]" aria-label={t('subtitle_align')}>
+                                <option value="left">{t('align_left')}</option>
+                                <option value="center">{t('align_center')}</option>
+                                <option value="right">{t('align_right')}</option>
+                              </select>
+                            </div>
+                            {/* Color / Bg / lineHeight */}
+                            <div className="grid grid-cols-3 gap-2">
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_color')}<input type="color" value={cue.color} onChange={(e) => updateSubtitle(cue.id, { color: e.target.value })} className="h-6 w-full rounded border border-[var(--border)]" /></label>
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_bg')}
+                                <div className="flex gap-0.5">
+                                  <input type="color" value={cue.backgroundColor || '#000000'} onChange={(e) => updateSubtitle(cue.id, { backgroundColor: e.target.value })} className="h-6 flex-1 rounded border border-[var(--border)]" />
+                                  <button type="button" onClick={() => updateSubtitle(cue.id, { backgroundColor: '' })} className="rounded border border-[var(--border)] px-1 text-[8px] text-[var(--muted)] hover:text-red-500" title={t('clear_bg')}>✕</button>
+                                </div>
+                              </label>
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_line_height')}<input type="number" min={0.8} max={3} step={0.1} value={cue.lineHeight} onChange={(e) => updateSubtitle(cue.id, { lineHeight: Math.max(0.8, Math.min(3, Number(e.target.value) || 1.3)) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            </div>
+                            {/* Position / Width / Rotation */}
+                            <div className="grid grid-cols-4 gap-1.5">
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_x')}<input type="number" min={0} max={100} value={cue.position.x} onChange={(e) => updateSubtitle(cue.id, { position: { ...cue.position, x: clampNumber(e.target.value, 0, 100, cue.position.x) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_y')}<input type="number" min={0} max={100} value={cue.position.y} onChange={(e) => updateSubtitle(cue.id, { position: { ...cue.position, y: clampNumber(e.target.value, 0, 100, cue.position.y) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_width')}<input type="number" min={10} max={100} value={cue.width} onChange={(e) => updateSubtitle(cue.id, { width: clampNumber(e.target.value, 10, 100, cue.width) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_rotation')}<input type="number" min={-360} max={360} value={cue.rotation} onChange={(e) => updateSubtitle(cue.id, { rotation: clampNumber(e.target.value, -360, 360, 0) })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            </div>
+                            {/* Start / End time */}
+                            <div className="grid grid-cols-2 gap-2">
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_start')}<input type="number" min={0} max={Math.max(0, cue.endTime - 0.1)} step={0.1} value={cue.startTime} onChange={(e) => { const v = Math.max(0, Math.min(cue.endTime - 0.01, Number(e.target.value) || 0)); updateSubtitle(cue.id, { startTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                              <label className="text-[10px] text-[var(--muted)]">{t('subtitle_end')}<input type="number" min={cue.startTime + 0.01} step={0.1} value={cue.endTime} onChange={(e) => { const v = Math.max(cue.startTime + 0.01, Number(e.target.value) || cue.startTime + 1); updateSubtitle(cue.id, { endTime: v }); }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                            </div>
+                            {/* TTS */}
+                            <div className="rounded border border-[var(--border)] p-2 mt-2">
+                              <label className="flex items-center gap-2 text-[10px] mb-2">
+                                <input type="checkbox" checked={cue.tts?.enabled ?? false} disabled={!ttsSupported} onChange={(e) => {
+                                  const enabled = e.target.checked;
+                                  if (enabled && !cue.tts) {
+                                    updateSubtitle(cue.id, { tts: { enabled: true, voiceURI: '', lang: '', rate: 1, pitch: 1, volume: 1 } });
+                                  } else if (cue.tts) {
+                                    updateSubtitle(cue.id, { tts: { ...cue.tts, enabled } });
+                                  }
+                                }} className="accent-indigo-500" />
+                                <span className="font-medium">{t('tts_enable')}</span>
+                              </label>
+                              {cue.tts?.enabled && (
+                                <div className="space-y-2">
+                                  <select value={cue.tts.voiceURI} onChange={(e) => {
+                                    const voice = ttsVoices.find((v) => v.voiceURI === e.target.value);
+                                    updateSubtitle(cue.id, { tts: { ...cue.tts!, voiceURI: e.target.value, lang: voice?.lang ?? cue.tts!.lang } });
+                                  }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px]" aria-label={t('tts_voice')}>
+                                    <option value="">{t('tts_voice')}</option>
+                                    {ttsVoices.map((v) => <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>)}
+                                  </select>
+                                  {ttsVoices.length === 0 && <p className="text-[9px] text-[var(--muted)]">{t('tts_no_voices')}</p>}
+                                  <div className="grid grid-cols-3 gap-1.5">
+                                    <label className="text-[10px] text-[var(--muted)]">{t('tts_rate')}<input type="number" min={0.5} max={2} step={0.1} value={cue.tts.rate} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, rate: clampNumber(e.target.value, 0.5, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                                    <label className="text-[10px] text-[var(--muted)]">{t('tts_pitch')}<input type="number" min={0} max={2} step={0.1} value={cue.tts.pitch} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, pitch: clampNumber(e.target.value, 0, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                                    <label className="text-[10px] text-[var(--muted)]">{t('tts_volume')}<input type="number" min={0} max={1} step={0.1} value={cue.tts.volume} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, volume: clampNumber(e.target.value, 0, 1, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-[10px] font-mono" /></label>
+                                  </div>
+                                  <div className="flex gap-2">
+                                    <button onClick={() => previewTts(cue)} disabled={ttsPlaying} className="rounded bg-indigo-600 px-2 py-1 text-[10px] text-white hover:bg-indigo-500 disabled:opacity-40">{t('tts_preview')}</button>
+                                    <button onClick={stopTts} disabled={!ttsPlaying} className="rounded border border-[var(--border)] px-2 py-1 text-[10px] hover:bg-[var(--raised)] disabled:opacity-40">{t('tts_stop')}</button>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           </div>
                         )}

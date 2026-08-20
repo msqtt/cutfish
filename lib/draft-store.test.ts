@@ -45,6 +45,8 @@ const minimalState: DraftState = {
   textOverlays: [],
   backgroundMusic: null,
   presetName: null,
+  subtitles: [],
+  visualOverlays: [],
 };
 
 describe('draft-store CRUD', () => {
@@ -172,6 +174,82 @@ describe('applyStateDefaults', () => {
     expect(result.textOverlays).toEqual([]);
     expect(result.backgroundMusic).toBeNull();
     expect(result.presetName).toBeNull();
+  });
+});
+
+describe('subtitles and visualOverlays in applyStateDefaults', () => {
+  it('defaults subtitles to empty array when missing', () => {
+    const result = applyStateDefaults({ clips: [] } as unknown as Record<string, unknown>);
+    expect(result.subtitles).toEqual([]);
+  });
+
+  it('defaults visualOverlays to empty array when missing', () => {
+    const result = applyStateDefaults({ clips: [] } as unknown as Record<string, unknown>);
+    expect(result.visualOverlays).toEqual([]);
+  });
+
+  it('preserves existing subtitles', () => {
+    const subtitles = [
+      { id: 's1', text: 'Hello', fontFamily: 'sans', fontSize: 48, color: '#fff', backgroundColor: '', position: { x: 50, y: 50 }, width: 80, align: 'center', rotation: 0, startTime: 0, endTime: 5, tts: null },
+    ];
+    const result = applyStateDefaults({ clips: [], subtitles } as unknown as Record<string, unknown>);
+    expect(result.subtitles).toHaveLength(1);
+    expect(result.subtitles[0].id).toBe('s1');
+    expect(result.subtitles[0].text).toBe('Hello');
+  });
+
+  it('applies lineHeight default of 1.3 to old subtitles missing the field', () => {
+    const subtitles = [
+      { id: 's2', text: 'Old', fontFamily: 'sans', fontSize: 48, color: '#fff', backgroundColor: '', position: { x: 50, y: 50 }, width: 80, align: 'center', rotation: 0, startTime: 0, endTime: 5, tts: null },
+    ];
+    const result = applyStateDefaults({ clips: [], subtitles } as unknown as Record<string, unknown>);
+    expect(result.subtitles[0].lineHeight).toBe(1.3);
+  });
+
+  it('preserves existing lineHeight value', () => {
+    const subtitles = [
+      { id: 's3', text: 'Custom', fontFamily: 'sans', fontSize: 48, lineHeight: 1.8, color: '#fff', backgroundColor: '', position: { x: 50, y: 50 }, width: 80, align: 'center', rotation: 0, startTime: 0, endTime: 5, tts: null },
+    ];
+    const result = applyStateDefaults({ clips: [], subtitles } as unknown as Record<string, unknown>);
+    expect(result.subtitles[0].lineHeight).toBe(1.8);
+  });
+
+  it('preserves existing visualOverlays', () => {
+    const visualOverlays = [
+      { id: 'v1', type: 'rectangle', position: { x: 50, y: 50 }, size: { w: 30, h: 20 }, rotation: 0, opacity: 1, startTime: 1, endTime: 6, strokeColor: '#f00', strokeWidth: 2, fillColor: '', borderRadius: 0 },
+    ];
+    const result = applyStateDefaults({ clips: [], visualOverlays } as unknown as Record<string, unknown>);
+    expect(result.visualOverlays).toHaveLength(1);
+    expect(result.visualOverlays[0].id).toBe('v1');
+  });
+
+  it('preserves image File in visualOverlays through persistence', async () => {
+    const file = new File(['png-data'], 'overlay.png', { type: 'image/png' });
+    const visualOverlays = [
+      { id: 'v2', type: 'image', position: { x: 50, y: 50 }, size: { w: 30, h: 30 }, rotation: 0, opacity: 1, startTime: 0, endTime: 5, file },
+    ];
+    const stateWithOverlays = { ...minimalState, subtitles: [], visualOverlays };
+    const draft = await createDraft('Overlay Test', stateWithOverlays as unknown as DraftState);
+    const loaded = await loadDraft(draft.id);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.state.visualOverlays).toHaveLength(1);
+    expect(loaded!.state.visualOverlays[0]).toHaveProperty('file');
+    expect((loaded!.state.visualOverlays[0] as { file: File }).file).toBeInstanceOf(File);
+  });
+
+  it('does not persist url field on image overlays', () => {
+    const visualOverlays = [
+      { id: 'v3', type: 'image', position: { x: 50, y: 50 }, size: { w: 30, h: 30 }, rotation: 0, opacity: 1, startTime: 0, endTime: 5, file: new File(['x'], 'x.png'), url: 'blob:http://localhost/abc' },
+    ];
+    const result = applyStateDefaults({ clips: [], visualOverlays } as unknown as Record<string, unknown>);
+    // url should be stripped during applyStateDefaults
+    const imgOverlay = result.visualOverlays[0] as { url?: string };
+    expect(imgOverlay.url).toBeUndefined();
+  });
+
+  it('retains textOverlays as empty array for backward compatibility', () => {
+    const result = applyStateDefaults({ clips: [] } as unknown as Record<string, unknown>);
+    expect(result.textOverlays).toEqual([]);
   });
 });
 

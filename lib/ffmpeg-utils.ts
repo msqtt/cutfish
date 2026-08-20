@@ -54,6 +54,12 @@ export interface BgMusicExport {
   fadeOut: number;
 }
 
+export interface PngOverlayInput {
+  filename: string;
+  startTime: number;
+  endTime: number;
+}
+
 export interface AudioFadeSettings {
   fadeIn: number;
   fadeOut: number;
@@ -335,7 +341,8 @@ const DEFAULT_FONT_MAP: FontMap = {
 
 /**
  * Build extended FFmpeg command with all new features:
- * volume, mute, master volume, rotation, flips, speed, transitions, text overlays, bg music.
+ * volume, mute, master volume, rotation, flips, speed, transitions, text overlays, bg music,
+ * and optional PNG overlay inputs for subtitle/annotation burn-in.
  *
  * Preserves backward compatibility: all original buildFFmpegCommand parameters remain the same,
  * with new parameters added after.
@@ -354,6 +361,7 @@ export function buildFFmpegCommandExtended(
   textOverlays: TextOverlay[],
   bgMusic: BgMusicExport | null,
   fontMap: FontMap = DEFAULT_FONT_MAP,
+  overlayPngs: PngOverlayInput[] = [],
 ): string[] {
   if (clips.length === 0) throw new Error('At least one clip is required');
 
@@ -372,6 +380,11 @@ export function buildFFmpegCommandExtended(
   // Add bg music input
   if (bgMusic) {
     args.push('-i', bgMusic.filename);
+  }
+
+  // Add PNG overlay inputs (after clips and optional bgMusic)
+  for (const png of overlayPngs) {
+    args.push('-loop', '1', '-i', png.filename);
   }
 
   let filterComplex = '';
@@ -478,6 +491,21 @@ export function buildFFmpegCommandExtended(
   } else {
     filterComplex += '[eqv]null[filteredv];';
     finalVideoLabel = '[filteredv]';
+  }
+
+  // PNG overlay chain (subtitle/annotation burn-in)
+  if (overlayPngs.length > 0) {
+    // Compute first PNG overlay input index: clips + (bgMusic ? 1 : 0)
+    const pngBaseIndex = clips.length + (bgMusic ? 1 : 0);
+    let prevLabel = finalVideoLabel;
+    for (let i = 0; i < overlayPngs.length; i++) {
+      const png = overlayPngs[i];
+      const inputIdx = pngBaseIndex + i;
+      const outLabel = i === overlayPngs.length - 1 ? '[overlayv]' : `[ov${i}]`;
+      filterComplex += `${prevLabel}[${inputIdx}:v]overlay=0:0:shortest=1:eof_action=pass:enable='between(t,${formatFilterNumber(png.startTime)},${formatFilterNumber(png.endTime)})'${outLabel};`;
+      prevLabel = outLabel;
+    }
+    finalVideoLabel = '[overlayv]';
   }
 
   // Audio delay
