@@ -263,6 +263,7 @@ describe('backgroundMusic file persistence (B2)', () => {
         loop: true,
         fadeIn: 1,
         fadeOut: 2,
+        replaceOriginalAudio: false,
         file: new File(['audio'], 'track.mp3', { type: 'audio/mpeg' }),
       },
     };
@@ -333,5 +334,24 @@ describe('applyStateDefaults TTS migration', () => {
     ];
     const result = applyStateDefaults({ clips: [], subtitles } as unknown as Record<string, unknown>);
     expect(result.subtitles[0].tts).toBeNull();
+  });
+});
+
+
+describe('applyStateDefaults background audio replacement migration', () => {
+  it('defaults old background music to mixing with original audio', () => {
+    const result = applyStateDefaults({
+      clips: [],
+      backgroundMusic: { name: 'legacy.mp3', volume: 80, loop: false, fadeIn: 0, fadeOut: 0 },
+    });
+    expect(result.backgroundMusic?.replaceOriginalAudio).toBe(false);
+  });
+
+  it('preserves replacement mode from newer drafts', () => {
+    const result = applyStateDefaults({
+      clips: [],
+      backgroundMusic: { name: 'new.mp3', volume: 100, loop: true, fadeIn: 1, fadeOut: 2, replaceOriginalAudio: true },
+    });
+    expect(result.backgroundMusic?.replaceOriginalAudio).toBe(true);
   });
 });

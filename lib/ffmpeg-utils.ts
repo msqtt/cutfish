@@ -52,6 +52,7 @@ export interface BgMusicExport {
   loop: boolean;
   fadeIn: number;
   fadeOut: number;
+  replaceOriginalAudio?: boolean; // defaults to false for backward compatibility
 }
 
 export interface PngOverlayInput {
@@ -523,59 +524,76 @@ export function buildFFmpegCommandExtended(
     finalVideoLabel = '[overlayv]';
   }
 
-  // Audio delay
-  const delay = Math.round(safeNumber(audioDelayMs, 'audioDelayMs'));
-  if (delay > 0) {
-    filterComplex += `${audioOut}adelay=delays=${delay}:all=1[timeda];`;
-  } else if (delay < 0) {
-    filterComplex += `${audioOut}atrim=start=${Math.abs(delay) / 1000},asetpts=PTS-STARTPTS,`;
-    filterComplex += `apad,atrim=duration=${outputDuration}[timeda];`;
-  } else {
-    filterComplex += `${audioOut}anull[timeda];`;
-  }
+  const replaceOriginalAudio = bgMusic?.replaceOriginalAudio === true;
 
-  // Audio fades
+  // Validate global source-audio timing settings even when replacement mode bypasses them.
+  const delay = Math.round(safeNumber(audioDelayMs, 'audioDelayMs'));
   const requestedFadeIn = safeNumber(audioFade.fadeIn, 'fadeIn');
   const requestedFadeOut = safeNumber(audioFade.fadeOut, 'fadeOut');
   if (requestedFadeIn < 0) throw new Error('fadeIn must not be negative');
   if (requestedFadeOut < 0) throw new Error('fadeOut must not be negative');
-  const fadeIn = Math.min(requestedFadeIn, outputDuration);
-  const fadeOut = Math.min(requestedFadeOut, outputDuration);
-  const fadeFilters: string[] = [];
-  if (fadeIn > 0) fadeFilters.push(`afade=t=in:st=0:d=${formatFilterNumber(fadeIn)}`);
-  if (fadeOut > 0) {
-    fadeFilters.push(`afade=t=out:st=${formatFilterNumber(outputDuration - fadeOut)}:d=${formatFilterNumber(fadeOut)}`);
-  }
-  filterComplex += fadeFilters.length
-    ? `[timeda]${fadeFilters.join(',')}[synceda];`
-    : '[timeda]anull[synceda];';
 
-  // Background music mixing
-  let finalAudioLabel = '[synceda]';
+  let finalAudioLabel: string;
+  if (replaceOriginalAudio) {
+    // Consume the concatenated source audio without allowing it into the output.
+    filterComplex += `${audioOut}anullsink;`;
+    finalAudioLabel = '[bgaudio]';
+  } else {
+    // Audio delay
+    if (delay > 0) {
+      filterComplex += `${audioOut}adelay=delays=${delay}:all=1[timeda];`;
+    } else if (delay < 0) {
+      filterComplex += `${audioOut}atrim=start=${Math.abs(delay) / 1000},asetpts=PTS-STARTPTS,`;
+      filterComplex += `apad,atrim=duration=${outputDuration}[timeda];`;
+    } else {
+      filterComplex += `${audioOut}anull[timeda];`;
+    }
+
+    // Audio fades
+    const fadeIn = Math.min(requestedFadeIn, outputDuration);
+    const fadeOut = Math.min(requestedFadeOut, outputDuration);
+    const fadeFilters: string[] = [];
+    if (fadeIn > 0) fadeFilters.push(`afade=t=in:st=0:d=${formatFilterNumber(fadeIn)}`);
+    if (fadeOut > 0) {
+      fadeFilters.push(`afade=t=out:st=${formatFilterNumber(outputDuration - fadeOut)}:d=${formatFilterNumber(fadeOut)}`);
+    }
+    filterComplex += fadeFilters.length
+      ? `[timeda]${fadeFilters.join(',')}[synceda];`
+      : '[timeda]anull[synceda];';
+    finalAudioLabel = '[synceda]';
+  }
+
+  // Background music: mix with source audio, or use it as the replacement baseline.
   if (bgMusic) {
-    const bgInputIdx = clips.length; // bg music is the last input
+    const bgInputIdx = clips.length;
     const bgVolNorm = (bgMusic.volume ?? 100) / 100;
     let bgAudioChain = `[${bgInputIdx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo`;
 
     if (bgMusic.loop) {
       bgAudioChain += `,aloop=loop=-1:size=2e+09`;
     }
-    bgAudioChain += `,atrim=duration=${outputDuration}`;
+    bgAudioChain += `,apad,atrim=duration=${outputDuration}`;
 
-    if (bgMusic.fadeIn > 0) {
-      bgAudioChain += `,afade=t=in:st=0:d=${formatFilterNumber(bgMusic.fadeIn)}`;
+    const bgFadeIn = Math.min(Math.max(0, bgMusic.fadeIn), outputDuration);
+    const bgFadeOut = Math.min(Math.max(0, bgMusic.fadeOut), outputDuration);
+    if (bgFadeIn > 0) {
+      bgAudioChain += `,afade=t=in:st=0:d=${formatFilterNumber(bgFadeIn)}`;
     }
-    if (bgMusic.fadeOut > 0) {
-      bgAudioChain += `,afade=t=out:st=${formatFilterNumber(outputDuration - bgMusic.fadeOut)}:d=${formatFilterNumber(bgMusic.fadeOut)}`;
+    if (bgFadeOut > 0) {
+      bgAudioChain += `,afade=t=out:st=${formatFilterNumber(outputDuration - bgFadeOut)}:d=${formatFilterNumber(bgFadeOut)}`;
     }
     bgAudioChain += `,volume=${bgVolNorm}[bgaudio]`;
-    filterComplex += `${bgAudioChain};`;
-    filterComplex += `[synceda][bgaudio]amix=inputs=2:duration=first[bgmixed]`;
-    finalAudioLabel = '[bgmixed]';
+
+    if (replaceOriginalAudio) {
+      filterComplex += bgAudioChain;
+      finalAudioLabel = '[bgaudio]';
+    } else {
+      filterComplex += `${bgAudioChain};`;
+      filterComplex += `[synceda][bgaudio]amix=inputs=2:duration=first[bgmixed]`;
+      finalAudioLabel = '[bgmixed]';
+    }
   } else {
-    // Remove trailing semicolon from synceda and use it directly
     filterComplex = filterComplex.replace(/;\s*$/, '');
-    finalAudioLabel = '[synceda]';
   }
 
   // TTS audio mixing
@@ -629,7 +647,7 @@ export function buildFFmpegCommandExtended(
     const amixInputs = ttsLabels.length + 1;
     filterComplex += `${finalAudioLabel}${ttsLabels.join('')}amix=inputs=${amixInputs}:duration=first[finala]`;
     finalAudioLabel = '[finala]';
-  } else if (bgMusic) {
+  } else if (bgMusic && !replaceOriginalAudio) {
     // Rename bgmixed to finala for backward compatibility in -map
     filterComplex = filterComplex.replace('[bgmixed]', '[finala]');
     finalAudioLabel = '[finala]';

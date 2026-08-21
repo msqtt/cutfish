@@ -88,6 +88,8 @@ const resources = {
       background_audio: 'Background audio', import_audio: 'Import audio',
       audio_volume: 'Volume', audio_loop: 'Loop', audio_fade_in: 'Fade in',
       audio_fade_out: 'Fade out', remove_audio: 'Remove audio',
+      replace_original_audio: 'Replace video audio with this track',
+      replace_original_audio_hint: 'Removes all video-source sound on export. Background music becomes the main track; subtitle TTS is still included. Original-audio sync and fades are ignored.',
       invalid_audio: 'Choose a valid audio file.',
       // Presets
       presets: 'Presets', apply_preset: 'Apply', no_preset: 'Custom',
@@ -228,6 +230,8 @@ const resources = {
       background_audio: '背景音乐', import_audio: '导入音频',
       audio_volume: '音量', audio_loop: '循环', audio_fade_in: '淡入',
       audio_fade_out: '淡出', remove_audio: '移除音频',
+      replace_original_audio: '用这段背景音乐替换视频原声',
+      replace_original_audio_hint: '导出时移除所有视频原声，以背景音乐作为主音轨；字幕 TTS 仍会保留。原声音频同步和淡入淡出设置将被忽略。',
       invalid_audio: '请选择有效的音频文件。',
       // Presets
       presets: '预设', apply_preset: '应用', no_preset: '自定义',

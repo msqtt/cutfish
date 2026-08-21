@@ -77,7 +77,7 @@ export interface EditorState {
   playbackSpeed: number;
   transitions: TransitionConfig[];
   textOverlays: TextOverlay[];
-  backgroundMusic: { name: string; file?: File; url?: string; volume: number; loop: boolean; fadeIn: number; fadeOut: number } | null;
+  backgroundMusic: { name: string; file?: File; url?: string; volume: number; loop: boolean; fadeIn: number; fadeOut: number; replaceOriginalAudio: boolean } | null;
   presetName: string | null;
   subtitles: SubtitleCue[];
   visualOverlays: VisualOverlay[];
@@ -218,6 +218,7 @@ function editorStateToDraft(state: EditorState): DraftState {
       loop: state.backgroundMusic.loop,
       fadeIn: state.backgroundMusic.fadeIn,
       fadeOut: state.backgroundMusic.fadeOut,
+      replaceOriginalAudio: state.backgroundMusic.replaceOriginalAudio,
       file: state.backgroundMusic.file,
     } : null,
     presetName: state.presetName,
@@ -259,6 +260,7 @@ function draftToEditorState(draft: DraftState, createUrl: (file: Blob) => string
     textOverlays: (draft.textOverlays ?? []) as TextOverlay[],
     backgroundMusic: draft.backgroundMusic ? {
       ...draft.backgroundMusic,
+      replaceOriginalAudio: draft.backgroundMusic.replaceOriginalAudio ?? false,
       file: draft.backgroundMusic.file instanceof Blob ? draft.backgroundMusic.file as File : undefined,
       url: draft.backgroundMusic.file instanceof Blob ? createUrl(draft.backgroundMusic.file as File) : undefined,
     } : null,
@@ -620,7 +622,7 @@ export default function Editor() {
       ...current,
       backgroundMusic: {
         name: file.name, file, url,
-        volume: 80, loop: false, fadeIn: 0, fadeOut: 0,
+        volume: 80, loop: false, fadeIn: 0, fadeOut: 0, replaceOriginalAudio: false,
       },
     }));
   }, [createTrackedUrl, t, updateState]);
@@ -855,6 +857,7 @@ export default function Editor() {
           loop: state.backgroundMusic.loop,
           fadeIn: state.backgroundMusic.fadeIn,
           fadeOut: state.backgroundMusic.fadeOut,
+          replaceOriginalAudio: state.backgroundMusic.replaceOriginalAudio,
         };
       }
 
@@ -2045,6 +2048,13 @@ export default function Editor() {
                         <Music className="h-4 w-4 text-indigo-500 shrink-0" />
                         <span className="flex-1 truncate text-xs">{state.backgroundMusic.name}</span>
                         <button onClick={() => updateState((c) => ({ ...c, backgroundMusic: null }))} className="text-red-500 hover:text-red-400" aria-label={t('remove_audio')}><Trash2 className="h-3.5 w-3.5" /></button>
+                      </div>
+                      <div className="rounded border border-indigo-500/30 bg-indigo-500/5 p-2.5">
+                        <label className="flex items-start gap-2 text-xs font-medium text-[var(--text)]">
+                          <input type="checkbox" checked={state.backgroundMusic.replaceOriginalAudio} onChange={(e) => updateState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, replaceOriginalAudio: e.target.checked } : null }))} aria-describedby="replace-original-audio-hint" className="mt-0.5 accent-indigo-500" />
+                          <span>{t('replace_original_audio')}</span>
+                        </label>
+                        <p id="replace-original-audio-hint" className="mt-1.5 text-xs leading-4 text-[var(--muted)]">{t('replace_original_audio_hint')}</p>
                       </div>
                       <RangeControl label={t('audio_volume')} value={state.backgroundMusic.volume} min={0} max={200} onChange={(v) => replaceState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, volume: v } : null }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                       <label className="flex items-center gap-2 text-xs text-[var(--muted)]">

@@ -31,7 +31,7 @@ Cutfish is a privacy-first browser video editor. Source files, drafts, and rende
 - Inter-clip transitions (fade, dissolve, wipe variants, slide variants) via FFmpeg xfade/acrossfade
   - Mixed transition/non-transition graph produces valid FFmpeg filter chain (M7)
 - Timed text overlays rendered at export via drawtext filter with bundled DejaVu-licensed DejaVu Sans font (B3); live preview in browser via positioned spans
-- Background audio mixing with import, volume, loop, fade-in, fade-out, File persistence in IndexedDB, and URL recreation on restore (B2)
+- Background audio mixing or full video-source-audio replacement, with import, volume, loop, fade-in, fade-out, File persistence in IndexedDB, and URL recreation on restore (B2)
 - One-click project presets (Social Reel, YouTube, Quick Share, Cinematic)
 - Custom named preset save/apply/delete with localStorage persistence (M5)
 - Inline clip rename (displayName) with accessible edit flow; input moved outside button to avoid invalid HTML nesting (M6)
@@ -161,6 +161,7 @@ interface BgMusic {
   loop: boolean;
   fadeIn: number;
   fadeOut: number;
+  replaceOriginalAudio: boolean; // default false; when true export omits all video-source audio
 }
 
 interface DraftProject {
@@ -238,7 +239,7 @@ Inputs are probed after being written to FFmpeg MEMFS. Clips without an audio st
 
 Users can independently configure global audio fade-in and fade-out durations in seconds. Fades are applied after concatenation and audio-delay correction, against the final selected export duration. Each duration is clamped to the output duration; zero disables that fade. Negative and non-finite values are rejected by the pure command builder.
 
-Background audio (if present) is written as an additional MEMFS file, then mixed via amix after the main audio pipeline. It supports volume scaling, looping (aloop), trim to project duration, and independent fade-in/fade-out.
+Background audio (if present) is written as an additional MEMFS file. By default it is mixed with the processed video-source audio via `amix`. Users may instead enable `replaceOriginalAudio`, which routes the concatenated source-audio output to `anullsink` and maps the duration-padded background track as the export audio baseline, so no video-source sound reaches the output. Subtitle TTS remains mixed on top in either mode. Background audio supports volume scaling, looping (`aloop`), duration padding/trimming, and independent fade-in/fade-out. Older drafts default `replaceOriginalAudio` to `false`.
 
 MP4 uses H.264/AAC with `faststart`; WebM uses VP9/Opus.
 

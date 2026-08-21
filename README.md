@@ -20,7 +20,7 @@ All processing happens locally—your media never leaves your device.
 - **Visual overlays** (drawing, rectangle, image): pen tool draws freehand on preview with real-time draft line; rectangle tool drag-draws with live dashed preview; image import inserts at current frame time; all support x/y, width/height, rotation, opacity, time range (clamped, end>start), stroke/fill/lineWidth (where applicable), and delete; drawing uses `rebaseDrawingPoints` for consistent preview/export local coordinates; `touch-action:none` in draw mode; `pointercancel`/`lostpointercapture` handled to prevent stuck state
 - **Transparent PNG renderer** for export: drawing/rectangle/image overlays AND subtitles rendered to full-resolution PNGs via `selectAndShiftOverlaysForExport`, written to MEMFS, passed to `buildFFmpegCommandExtended` overlay chain with `shortest=1:eof_action=pass`; export range filters to intersecting items only; font/image load failures are fail-fast; temp files cleaned after export
 - **Image overlay persistence**: `File` stored in IndexedDB via structured clone; `url` is runtime-only (recreated from File on load); deletion does not revoke URL (preserves undo); project switch/teardown revokes all tracked URLs
-- **Background audio** import with volume, loop, fade-in, fade-out, mixing, and File persistence in IndexedDB (restored with tracked URL on project switch)
+- **Background audio** import with volume, loop, fade-in, fade-out, and File persistence in IndexedDB (restored with tracked URL on project switch); choose normal mixing or replace all video-source audio while keeping subtitle TTS
 - **Global filters** (brightness, contrast, saturation) with real-time CSS preview
 - **Audio sync** adjustment (±5000ms) and global fade-in/fade-out
 - **Project range export** with speed-aware duration, resolution (480p–1080p), frame rate (24/30/60), and quality presets
@@ -100,7 +100,7 @@ Export uses `buildFFmpegCommandExtended` which processes:
 4. Text overlays: drawtext filters (for legacy TextOverlay objects)
 5. Visual overlays + Subtitles: pre-rendered to full-resolution transparent PNGs via OffscreenCanvas overlay-renderer → `overlay=0:0:shortest=1:eof_action=pass:enable='between(t,...)'`
 6. TTS: enabled cues synthesized to WAV via local Piper VITS (models cached in OPFS), written to MEMFS, mixed with atrim→atempo→volume→adelay→amix
-7. Audio: delay → fade → background music mix (amix)
+7. Audio: source delay/fade → background music mix, or source discard + duration-padded background replacement → optional subtitle TTS mix
 
 Subtitles are rendered as transparent PNGs (not via drawtext) supporting manual line breaks, auto word/char wrapping, fontFamily, fontSize, lineHeight, color, transparent background, alignment, rotation, and position. Visual overlays (drawing/rectangle/image) are also rendered to PNGs. All overlay PNG inputs use `shortest=1:eof_action=pass` to properly terminate when the main video stream ends. Background music input index accounts for both clip count and optional bgMusic, preserving correct final `-map` references.
 

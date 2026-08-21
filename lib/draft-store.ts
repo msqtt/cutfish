@@ -42,7 +42,7 @@ export interface DraftState {
   playbackSpeed: number;
   transitions: Array<{ id: string; afterClipId: string; type: string; duration: number }>;
   textOverlays: Array<{ id: string; text: string; fontFamily: string; fontSize: number; color: string; position: { x: number; y: number }; startTime: number; endTime: number }>;
-  backgroundMusic: { name: string; volume: number; loop: boolean; fadeIn: number; fadeOut: number; file?: File } | null;
+  backgroundMusic: { name: string; volume: number; loop: boolean; fadeIn: number; fadeOut: number; replaceOriginalAudio: boolean; file?: File } | null;
   presetName: string | null;
   customPresets?: Array<{ name: string; canvasAspect: string; canvasFit: string; exportSettings: { resolution: string; frameRate: number; quality: string } }>;
   subtitles: SubtitleCue[];
@@ -94,7 +94,10 @@ export function applyStateDefaults(state: Record<string, unknown>): DraftState {
     playbackSpeed: base.playbackSpeed ?? 1,
     transitions: base.transitions ?? [],
     textOverlays: base.textOverlays ?? [],
-    backgroundMusic: base.backgroundMusic ?? null,
+    backgroundMusic: base.backgroundMusic ? {
+      ...base.backgroundMusic,
+      replaceOriginalAudio: base.backgroundMusic.replaceOriginalAudio ?? false,
+    } : null,
     presetName: base.presetName ?? null,
     subtitles: ((base.subtitles ?? []) as SubtitleCue[]).map((cue) => ({
       ...cue,

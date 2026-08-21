@@ -20,7 +20,7 @@
 - **视觉标注**（画笔、矩形、图片）：画笔在预览上自由绘制并实时显示草稿线条；矩形工具拖拽绘制并实时虚线预览；图片导入在当前帧时间插入；支持 x/y、宽高、旋转、不透明度、时间范围（钳制 end>start）、描边/填充/线宽；绘制模式 touch-action:none，处理 pointercancel/lostpointercapture 防止卡住；画笔坐标使用 rebaseDrawingPoints 转为 bounds 内局部 0..1 坐标，预览/导出一致
 - **透明 PNG 渲染器**：字幕 + 视觉标注均通过 `selectAndShiftOverlaysForExport` 裁剪导出范围，渲染为全分辨率 PNG，写入 MEMFS 传递给 `buildFFmpegCommandExtended`，overlay 链使用 `shortest=1:eof_action=pass`；字体/图片加载失败 fail-fast；导出后清理临时文件
 - **图片标注持久化**：File 存入 IndexedDB（结构化克隆），url 仅运行时（加载项目时从 File 重建）；删除不立即 revoke（保留 undo）；项目切换/teardown 统一撤销所有 tracked URL
-- **背景音乐**：导入、音量、循环、淡入、淡出、混音，File 持久化在 IndexedDB 中（切换项目时恢复 URL）
+- **背景音乐**：导入、音量、循环、淡入、淡出，File 持久化在 IndexedDB 中（切换项目时恢复 URL）；可选择与视频原声混音，或移除全部视频原声并以背景音乐替换，同时保留字幕 TTS
 - **全局滤镜**（亮度、对比度、饱和度）实时 CSS 预览
 - **音频同步**调整（±5000ms）与全局淡入/淡出
 - **项目范围导出**：速度感知时长，分辨率（480p–1080p）、帧率（24/30/60）、质量预设
@@ -100,7 +100,7 @@ lib/i18n.ts                – 中英文翻译资源
 4. 文字叠加：drawtext 滤镜（遗留 TextOverlay 对象）
 5. 字幕 + 视觉标注：通过 OffscreenCanvas 渲染为全画布透明 PNG → `overlay=0:0:shortest=1:eof_action=pass:enable='between(t,...)'`
 6. TTS：启用的字幕通过本地 Piper VITS 合成 WAV（模型缓存在 OPFS），写入 MEMFS，通过 atrim→atempo→volume→adelay→amix 混音
-7. 音频：延迟 → 淡入淡出 → 背景音乐混音（amix）
+7. 音频：原声同步/淡入淡出 → 背景音乐混音，或丢弃原声 + 补齐时长的背景音乐替换 → 可选字幕 TTS 混音
 
 字幕渲染为透明 PNG（非 drawtext），支持手动换行、自动按词/字符换行（基于 cue.width）、fontFamily、fontSize、lineHeight、color、可透明背景、align、position、rotation。视觉标注（画笔/矩形/图片）同样渲染为 PNG。所有 PNG overlay 使用 `shortest=1:eof_action=pass` 确保主视频结束时正确终止。
 

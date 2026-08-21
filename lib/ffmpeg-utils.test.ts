@@ -631,3 +631,45 @@ describe('buildFFmpegCommandExtended with ttsAudioInputs', () => {
     expect(inputs).toEqual(['a.mp4', 'b.mp4', 'bg.mp3', 'sub.png', 'tts.wav']);
   });
 });
+
+
+describe('buildFFmpegCommandExtended background music replacement mode', () => {
+  const clips: ExtendedClipMetadata[] = [
+    { id: 'a', filename: 'a.mp4', trimStart: 0, trimEnd: 10, hasAudio: true, volume: 140, muted: false, rotation: 0, flipH: false, flipV: false, speed: 1 },
+  ];
+  const replacementMusic: BgMusicExport = {
+    filename: 'replacement.mp3', volume: 80, loop: false, fadeIn: 0, fadeOut: 0,
+    replaceOriginalAudio: true,
+  };
+
+  it('discards video-source audio and maps background music directly', () => {
+    const args = buildFFmpegCommandExtended(clips, filters, 250, { fadeIn: 1, fadeOut: 1 }, 'mp4', resolveExportProfile(settings), 120, '16:9', 'contain', [], [], replacementMusic);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    const mapIdx = args.lastIndexOf('-map');
+
+    expect(graph).toContain('[concata]anullsink;');
+    expect(graph).toContain('[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=duration=10');
+    expect(graph).not.toContain('[synceda][bgaudio]amix');
+    expect(args[mapIdx + 1]).toBe('[bgaudio]');
+  });
+
+  it('keeps subtitle TTS while replacing video-source audio', () => {
+    const tts: TtsAudioInput[] = [
+      { filename: 'tts.wav', startTime: 1, endTime: 3, sourceTrimStart: 0, rate: 1, volume: 1 },
+    ];
+    const args = buildFFmpegCommandExtended(clips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], replacementMusic, undefined, [], tts);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+
+    expect(graph).toContain('[bgaudio][tts0]amix=inputs=2:duration=first[finala]');
+    expect(args[args.lastIndexOf('-map') + 1]).toBe('[finala]');
+  });
+
+  it('preserves the existing mix behavior when replacement is disabled', () => {
+    const mixedMusic: BgMusicExport = { ...replacementMusic, replaceOriginalAudio: false };
+    const args = buildFFmpegCommandExtended(clips, filters, 0, noFade, 'mp4', resolveExportProfile(settings), 100, '16:9', 'contain', [], [], mixedMusic);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+
+    expect(graph).toContain('[synceda][bgaudio]amix=inputs=2:duration=first[finala]');
+    expect(graph).not.toContain('[concata]anullsink;');
+  });
+});
