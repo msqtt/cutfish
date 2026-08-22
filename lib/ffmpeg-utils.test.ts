@@ -15,6 +15,7 @@ import {
   type BgMusicExport,
   type PngOverlayInput,
   type TtsAudioInput,
+  type AudioTrackInput,
 } from './ffmpeg-utils';
 
 const filters = { brightness: 110, contrast: 95, saturation: 120 };
@@ -671,5 +672,120 @@ describe('buildFFmpegCommandExtended background music replacement mode', () => {
 
     expect(graph).toContain('[synceda][bgaudio]amix=inputs=2:duration=first[finala]');
     expect(graph).not.toContain('[concata]anullsink;');
+  });
+});
+
+describe('buildFFmpegCommandExtended editable audio track', () => {
+  const atClips: ExtendedClipMetadata[] = [
+    { id: 'a', filename: 'a.mp4', trimStart: 0, trimEnd: 10, hasAudio: true, volume: 100, muted: false, rotation: 0, flipH: false, flipV: false, speed: 1 },
+  ];
+  const profile = resolveExportProfile(settings);
+
+  // Two visible segments sharing the same source File, added as separate inputs.
+  const twoSegments: AudioTrackInput[] = [
+    { filename: 'bg.mp3', inputIndex: 1, startTime: 0, endTime: 4, sourceTrimStart: 0, sourceTrimEnd: 4, volume: 0.8, fadeIn: 1, fadeOut: 0 },
+    { filename: 'bg.mp3', inputIndex: 2, startTime: 6, endTime: 10, sourceTrimStart: 20, sourceTrimEnd: 24, volume: 0.5, fadeIn: 0, fadeOut: 2 },
+  ];
+
+  it('adds one -i per visible segment for the same source filename', () => {
+    const args = buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 100, '16:9', 'contain', [], [], null,
+      undefined, [], [], twoSegments, false,
+    );
+    // clip input + two identical bg.mp3 inputs
+    const inputArgs = args.filter((_, i) => args[i - 1] === '-i');
+    expect(inputArgs).toEqual(['a.mp4', 'bg.mp3', 'bg.mp3']);
+  });
+
+  it('builds per-segment atrim/asetpts/48k stereo/volume/fades/adelay and mixes over source audio', () => {
+    const args = buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 100, '16:9', 'contain', [], [], null,
+      undefined, [], [], twoSegments, false,
+    );
+    const graph = args[args.indexOf('-filter_complex') + 1];
+
+    // Segment 0: input 1, source trim 0..4, fade-in 1, delay 0 (no adelay), vol 0.8
+    expect(graph).toContain('[1:a]atrim=start=0:end=4,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.8,afade=t=in:st=0:d=1[at0];');
+    // Segment 1: input 2, source trim 20..24, fade-out 2 (starts at seg dur 4 - 2 = 2), delay 6000ms, vol 0.5
+    expect(graph).toContain('[2:a]atrim=start=20:end=24,asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.5,afade=t=out:st=2:d=2,adelay=delays=6000:all=1[at1];');
+    // Mix over processed source audio [synceda]
+    expect(graph).toContain('[synceda][at0][at1]amix=inputs=3:duration=first[atmixed]');
+    expect(args[args.lastIndexOf('-map') + 1]).toBe('[atmixed]');
+  });
+
+  it('uses a silent duration-matched base and discards source audio in replacement mode', () => {
+    const args = buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 100, '16:9', 'contain', [], [], null,
+      undefined, [], [], twoSegments, true,
+    );
+    const graph = args[args.indexOf('-filter_complex') + 1];
+
+    // Source audio routed to null sink
+    expect(graph).toContain('[concata]anullsink;');
+    // Silent stereo base matched to output duration (10s)
+    expect(graph).toContain('anullsrc=r=48000:cl=stereo,atrim=duration=10,asetpts=PTS-STARTPTS[atbase];');
+    // Segments mixed over the silent base
+    expect(graph).toContain('[atbase][at0][at1]amix=inputs=3:duration=first[atmixed]');
+    expect(args[args.lastIndexOf('-map') + 1]).toBe('[atmixed]');
+  });
+
+  it('keeps subtitle TTS as the final mix layer above the audio track', () => {
+    const tts: TtsAudioInput[] = [
+      { filename: 'tts.wav', startTime: 1, endTime: 3, sourceTrimStart: 0, rate: 1, volume: 1 },
+    ];
+    const single: AudioTrackInput[] = [twoSegments[0]];
+    const args = buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 100, '16:9', 'contain', [], [], null,
+      undefined, [], tts, single, true,
+    );
+    const graph = args[args.indexOf('-filter_complex') + 1];
+
+    // TTS input index accounts for clips(1) + audioTrack(1) + png(0) = 2
+    expect(graph).toContain('[2:a]atrim=start=0,asetpts=PTS-STARTPTS');
+    // TTS mixed over the audio-track mix
+    expect(graph).toContain('[atmixed][tts0]amix=inputs=2:duration=first[finala]');
+    expect(args[args.lastIndexOf('-map') + 1]).toBe('[finala]');
+  });
+
+  it('keeps PNG overlay input indices correct after audio-track inputs', () => {
+    const pngs: PngOverlayInput[] = [{ filename: 'ov.png', startTime: 0, endTime: 5 }];
+    const args = buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 100, '16:9', 'contain', [], [], null,
+      undefined, pngs, [], twoSegments, false,
+    );
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    // PNG base index = clips(1) + audioTrack(2) = 3
+    expect(graph).toContain("[3:v]overlay=0:0:shortest=1");
+  });
+
+  it('rejects an invalid source trim range', () => {
+    const bad: AudioTrackInput[] = [
+      { filename: 'bg.mp3', inputIndex: 1, startTime: 0, endTime: 4, sourceTrimStart: 5, sourceTrimEnd: 5, volume: 1, fadeIn: 0, fadeOut: 0 },
+    ];
+    expect(() => buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 100, '16:9', 'contain', [], [], null,
+      undefined, [], [], bad, false,
+    )).toThrow('Invalid source trim for audio segment 0');
+  });
+
+  it('uses a silent replacement baseline even when no audio segment intersects the export range', () => {
+    const args = buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 100, '16:9', 'contain', [], [], null,
+      undefined, [], [], [], true,
+    );
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('[concata]anullsink;');
+    expect(graph).toContain('anullsrc=r=48000:cl=stereo,atrim=duration=10,asetpts=PTS-STARTPTS[atbase]');
+    expect(args[args.lastIndexOf('-map') + 1]).toBe('[atbase]');
+  });
+
+  it('leaves legacy bgMusic behavior unchanged when no audio-track inputs are passed', () => {
+    const bgMusic: BgMusicExport = { filename: 'legacy.mp3', volume: 100, loop: false, fadeIn: 0, fadeOut: 0 };
+    const args = buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 100, '16:9', 'contain', [], [], bgMusic,
+    );
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('[synceda][bgaudio]amix=inputs=2:duration=first[finala]');
+    expect(graph).not.toContain('[atmixed]');
   });
 });

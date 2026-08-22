@@ -55,6 +55,32 @@ export interface BgMusicExport {
   replaceOriginalAudio?: boolean; // defaults to false for backward compatibility
 }
 
+/**
+ * One visible audio-track segment routed to FFmpeg. Times are export-range
+ * relative (seconds). Each segment maps to one `-i` input; the shared source
+ * File may be added multiple times (once per visible segment), so `inputIndex`
+ * records which `-i` slot backs this segment.
+ */
+export interface AudioTrackInput {
+  filename: string;
+  /** Index into the FFmpeg `-i` list for this segment's source. */
+  inputIndex: number;
+  /** Export-range-relative playback start (seconds). */
+  startTime: number;
+  /** Export-range-relative playback end (seconds). */
+  endTime: number;
+  /** Trim from the beginning of the source file (seconds). */
+  sourceTrimStart: number;
+  /** Trim end within the source file (seconds). */
+  sourceTrimEnd: number;
+  /** Linear volume multiplier (0–2). */
+  volume: number;
+  /** Fade-in duration for this segment (seconds). */
+  fadeIn: number;
+  /** Fade-out duration for this segment (seconds). */
+  fadeOut: number;
+}
+
 export interface PngOverlayInput {
   filename: string;
   startTime: number;
@@ -373,6 +399,8 @@ export function buildFFmpegCommandExtended(
   fontMap: FontMap = DEFAULT_FONT_MAP,
   overlayPngs: PngOverlayInput[] = [],
   ttsAudioInputs: TtsAudioInput[] = [],
+  audioTrackInputs: AudioTrackInput[] = [],
+  audioTrackReplaceOriginal: boolean = false,
 ): string[] {
   if (clips.length === 0) throw new Error('At least one clip is required');
 
@@ -393,7 +421,14 @@ export function buildFFmpegCommandExtended(
     args.push('-i', bgMusic.filename);
   }
 
-  // Add PNG overlay inputs (after clips and optional bgMusic)
+  // Add editable audio-track segment inputs (after clips + optional bgMusic).
+  // Each visible segment is its own `-i`; the shared source File may repeat,
+  // so its MEMFS filename can appear multiple times.
+  for (const track of audioTrackInputs) {
+    args.push('-i', track.filename);
+  }
+
+  // Add PNG overlay inputs (after clips, optional bgMusic, and audio-track inputs)
   for (const png of overlayPngs) {
     args.push('-loop', '1', '-i', png.filename);
   }
@@ -511,8 +546,8 @@ export function buildFFmpegCommandExtended(
 
   // PNG overlay chain (subtitle/annotation burn-in)
   if (overlayPngs.length > 0) {
-    // Compute first PNG overlay input index: clips + (bgMusic ? 1 : 0)
-    const pngBaseIndex = clips.length + (bgMusic ? 1 : 0);
+    // Compute first PNG overlay input index: clips + (bgMusic ? 1 : 0) + audioTrackInputs
+    const pngBaseIndex = clips.length + (bgMusic ? 1 : 0) + audioTrackInputs.length;
     let prevLabel = finalVideoLabel;
     for (let i = 0; i < overlayPngs.length; i++) {
       const png = overlayPngs[i];
@@ -524,7 +559,11 @@ export function buildFFmpegCommandExtended(
     finalVideoLabel = '[overlayv]';
   }
 
-  const replaceOriginalAudio = bgMusic?.replaceOriginalAudio === true;
+  const hasAudioTrack = audioTrackInputs.length > 0;
+  // Replacement is enabled by legacy bgMusic.replaceOriginalAudio OR the new
+  // independent audio-track replacement flag.
+  const replaceOriginalAudio = bgMusic?.replaceOriginalAudio === true
+    || audioTrackReplaceOriginal === true;
 
   // Validate global source-audio timing settings even when replacement mode bypasses them.
   const delay = Math.round(safeNumber(audioDelayMs, 'audioDelayMs'));
@@ -537,7 +576,15 @@ export function buildFFmpegCommandExtended(
   if (replaceOriginalAudio) {
     // Consume the concatenated source audio without allowing it into the output.
     filterComplex += `${audioOut}anullsink;`;
-    finalAudioLabel = '[bgaudio]';
+    if (bgMusic) {
+      // Legacy path: the bg track itself becomes the baseline (assigned below).
+      finalAudioLabel = '[bgaudio]';
+    } else {
+      // Audio-track path: a silent, duration-matched stereo base carries the
+      // segments in replacement mode so no video-source sound reaches output.
+      filterComplex += `anullsrc=r=48000:cl=stereo,atrim=duration=${formatFilterNumber(outputDuration)},asetpts=PTS-STARTPTS[atbase];`;
+      finalAudioLabel = '[atbase]';
+    }
   } else {
     // Audio delay
     if (delay > 0) {
@@ -592,14 +639,50 @@ export function buildFFmpegCommandExtended(
       filterComplex += `[synceda][bgaudio]amix=inputs=2:duration=first[bgmixed]`;
       finalAudioLabel = '[bgmixed]';
     }
+  } else if (hasAudioTrack) {
+    // Editable audio track: one processed chain per visible segment, then mix
+    // all of them over the current base (processed source audio in normal mode,
+    // or the silent duration-matched base in replacement mode).
+    if (!filterComplex.endsWith(';')) filterComplex += ';';
+
+    const segmentLabels: string[] = [];
+    audioTrackInputs.forEach((track, i) => {
+      const inputIdx = Number.isFinite(track.inputIndex) ? track.inputIndex : clips.length + i;
+      const trimStart = Math.max(0, safeNumber(track.sourceTrimStart, 'sourceTrimStart'));
+      const trimEnd = safeNumber(track.sourceTrimEnd, 'sourceTrimEnd');
+      if (trimEnd <= trimStart) throw new Error(`Invalid source trim for audio segment ${i}`);
+      const segDuration = trimEnd - trimStart;
+      const volNorm = Math.max(0, Math.min(2, safeNumber(track.volume, 'volume')));
+      const startTime = Math.max(0, safeNumber(track.startTime, 'startTime'));
+      const delayMs = Math.round(startTime * 1000);
+      const label = `[at${i}]`;
+
+      let chain = `[${inputIdx}:a]atrim=start=${formatFilterNumber(trimStart)}:end=${formatFilterNumber(trimEnd)},asetpts=PTS-STARTPTS`;
+      chain += `,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo`;
+      chain += `,volume=${formatFilterNumber(volNorm)}`;
+
+      const segFadeIn = Math.min(Math.max(0, safeNumber(track.fadeIn, 'fadeIn')), segDuration);
+      const segFadeOut = Math.min(Math.max(0, safeNumber(track.fadeOut, 'fadeOut')), segDuration);
+      if (segFadeIn > 0) chain += `,afade=t=in:st=0:d=${formatFilterNumber(segFadeIn)}`;
+      if (segFadeOut > 0) chain += `,afade=t=out:st=${formatFilterNumber(segDuration - segFadeOut)}:d=${formatFilterNumber(segFadeOut)}`;
+
+      // Position the segment at its project-relative start.
+      if (delayMs > 0) chain += `,adelay=delays=${delayMs}:all=1`;
+
+      chain += label;
+      filterComplex += `${chain};`;
+      segmentLabels.push(label);
+    });
+
+    const amixInputs = segmentLabels.length + 1;
+    filterComplex += `${finalAudioLabel}${segmentLabels.join('')}amix=inputs=${amixInputs}:duration=first[atmixed]`;
+    finalAudioLabel = '[atmixed]';
   } else {
     filterComplex = filterComplex.replace(/;\s*$/, '');
   }
-
-  // TTS audio mixing
   if (ttsAudioInputs.length > 0) {
-    // TTS input index: clips + (bgMusic ? 1 : 0) + overlayPngs.length
-    const ttsBaseIndex = clips.length + (bgMusic ? 1 : 0) + overlayPngs.length;
+    // TTS input index: clips + (bgMusic ? 1 : 0) + audioTrackInputs + overlayPngs.length
+    const ttsBaseIndex = clips.length + (bgMusic ? 1 : 0) + audioTrackInputs.length + overlayPngs.length;
 
     // Ensure trailing semicolon before TTS filters
     if (!filterComplex.endsWith(';')) {

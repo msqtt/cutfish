@@ -187,7 +187,13 @@ Clicking within a clip maps the horizontal ratio to its source trim interval, ac
 
 Range controls expose both a slider and bounded numeric input. Trim uses 0.01-second steps and audio synchronization uses 10-millisecond steps. Import remains sequential to avoid opening many media decoders at once, but reports per-file progress, blocks overlapping imports, skips duplicate file identities, and summarizes skipped/failed items. Draft writes are delayed while a continuous slider edit is active and committed once the interaction ends. Draft restoration is announced to the user.
 
-### 4.3 Multi-project management
+### 4.3 Editable audio track
+
+Imported background audio is represented by one source `File` plus independently editable timeline segments. Each segment stores `id`, project-relative `projectStart`, source-relative `trimStart`/`trimEnd`, volume, fade-in, and fade-out. The timeline renders these segments on an A1 row aligned with project time. A segment can be selected, moved horizontally, trimmed numerically, split at the project playhead, or deleted. Splitting reuses the same local source File and preserves only the outer fades.
+
+Pure helpers select segments intersecting the export range, shift their project times relative to `rangeStart`, and translate range cuts into source trim offsets. FFmpeg receives one audio input per visible segment, then applies `atrim`, `asetpts`, stereo/48k normalization, segment fades and volume, project-time `adelay`, and mixes all segments over either processed video-source audio or a silent duration-matched baseline when replacement mode is enabled. Subtitle TTS remains the final mix layer. Legacy single-background-music drafts migrate to one segment and missing source duration is hydrated from local browser metadata without uploading the file.
+
+### 4.4 Multi-project management
 
 Projects are stored in IndexedDB under a v2 schema (array of `DraftProject`). The manager modal allows:
 - **New project**: creates with user-provided or default name, switches to empty state
@@ -239,7 +245,7 @@ Inputs are probed after being written to FFmpeg MEMFS. Clips without an audio st
 
 Users can independently configure global audio fade-in and fade-out durations in seconds. Fades are applied after concatenation and audio-delay correction, against the final selected export duration. Each duration is clamped to the output duration; zero disables that fade. Negative and non-finite values are rejected by the pure command builder.
 
-Background audio (if present) is written as an additional MEMFS file. By default it is mixed with the processed video-source audio via `amix`. Users may instead enable `replaceOriginalAudio`, which routes the concatenated source-audio output to `anullsink` and maps the duration-padded background track as the export audio baseline, so no video-source sound reaches the output. Subtitle TTS remains mixed on top in either mode. Background audio supports volume scaling, looping (`aloop`), duration padding/trimming, and independent fade-in/fade-out. Older drafts default `replaceOriginalAudio` to `false`.
+The editable audio source is written to MEMFS once, while each visible segment is opened as a separate FFmpeg input referencing that same filename. Each segment applies source `atrim`, timestamp reset, stereo/48 kHz normalization, volume, edge-preserving fades, and project-relative delay before `amix`. By default segments mix over processed video-source audio. With `replaceOriginalAudio`, source audio is routed to `anullsink` and segments mix over a duration-matched silent baseline; gaps therefore remain silent and never restore video sound. If no segment intersects the selected export range, replacement mode still exports silence rather than original audio. Subtitle TTS remains the final mix layer. Older drafts default replacement to `false` and migrate their single background settings into one segment.
 
 MP4 uses H.264/AAC with `faststart`; WebM uses VP9/Opus.
 

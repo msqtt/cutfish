@@ -1,6 +1,7 @@
 import { get, set, del } from 'idb-keyval';
 import type { SubtitleCue, VisualOverlay } from './visual-overlay-utils';
 import { getDefaultLocalVoice } from './tts-utils';
+import type { AudioTrackSegment } from './audio-track-utils';
 
 export const LEGACY_KEY_V1 = 'cutfish-draft-v1';
 export const DRAFTS_KEY_V2 = 'cutfish-drafts-v2';
@@ -23,6 +24,33 @@ export interface DraftClip {
   displayName: string;
 }
 
+/**
+ * The new editable audio track: one local source File plus independently
+ * editable timeline segments. Replaces the legacy single-background-music model.
+ */
+export interface DraftAudioTrack {
+  name: string;
+  file?: File;
+  /** Runtime-only object URL (re-created on load). */
+  url?: string;
+  /** Source duration in seconds. 0 means unknown (hydrated from local metadata later). */
+  duration: number;
+  replaceOriginalAudio: boolean;
+  segments: AudioTrackSegment[];
+}
+
+/** Legacy (pre-track) single-background-music shape used by older drafts. */
+export interface LegacyBackgroundMusic {
+  name: string;
+  volume: number;
+  loop: boolean;
+  fadeIn: number;
+  fadeOut: number;
+  replaceOriginalAudio?: boolean;
+  file?: File;
+  duration?: number;
+}
+
 export interface DraftState {
   clips: DraftClip[];
   activeClipId: string | null;
@@ -42,7 +70,7 @@ export interface DraftState {
   playbackSpeed: number;
   transitions: Array<{ id: string; afterClipId: string; type: string; duration: number }>;
   textOverlays: Array<{ id: string; text: string; fontFamily: string; fontSize: number; color: string; position: { x: number; y: number }; startTime: number; endTime: number }>;
-  backgroundMusic: { name: string; volume: number; loop: boolean; fadeIn: number; fadeOut: number; replaceOriginalAudio: boolean; file?: File } | null;
+  backgroundMusic: DraftAudioTrack | null;
   presetName: string | null;
   customPresets?: Array<{ name: string; canvasAspect: string; canvasFit: string; exportSettings: { resolution: string; frameRate: number; quality: string } }>;
   subtitles: SubtitleCue[];
@@ -77,6 +105,74 @@ export function applyClipDefaults(clip: Partial<DraftClip> & { id: string; name:
 }
 
 /**
+ * Migrate the persisted `backgroundMusic` field into the editable audio-track
+ * model. Handles three shapes:
+ *  - null/undefined → null
+ *  - new track shape (has `segments`) → normalized in place
+ *  - legacy single-background-music (volume/loop/fadeIn/fadeOut/replaceOriginalAudio/file)
+ *    → one segment starting at projectStart=0, trimStart=0. Duration may be 0
+ *      (unknown) and is hydrated from local metadata later by the Editor.
+ * Legacy `loop` is preserved on the track for compatibility but the new track
+ * plays back explicit segments, so loop no longer drives the timeline.
+ */
+export function migrateBackgroundMusic(value: unknown): DraftAudioTrack | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+
+  // Already the new track shape.
+  if (Array.isArray(raw.segments)) {
+    const duration = typeof raw.duration === 'number' && Number.isFinite(raw.duration) && raw.duration > 0
+      ? raw.duration
+      : 0;
+    return {
+      name: typeof raw.name === 'string' ? raw.name : 'audio',
+      file: raw.file instanceof Blob ? (raw.file as File) : undefined,
+      duration,
+      replaceOriginalAudio: raw.replaceOriginalAudio === true,
+      segments: (raw.segments as AudioTrackSegment[]).map(normalizeSegment),
+    };
+  }
+
+  // Legacy single-background-music shape → one segment.
+  const legacy = raw as unknown as LegacyBackgroundMusic;
+  const duration = typeof legacy.duration === 'number' && Number.isFinite(legacy.duration) && legacy.duration > 0
+    ? legacy.duration
+    : 0;
+  const volume = typeof legacy.volume === 'number' && Number.isFinite(legacy.volume) ? legacy.volume : 80;
+  const fadeIn = typeof legacy.fadeIn === 'number' && Number.isFinite(legacy.fadeIn) ? Math.max(0, legacy.fadeIn) : 0;
+  const fadeOut = typeof legacy.fadeOut === 'number' && Number.isFinite(legacy.fadeOut) ? Math.max(0, legacy.fadeOut) : 0;
+  const segment: AudioTrackSegment = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    projectStart: 0,
+    trimStart: 0,
+    // Unknown duration → 0. The Editor hydrates trimEnd from local metadata.
+    trimEnd: duration,
+    volume,
+    fadeIn,
+    fadeOut,
+  };
+  return {
+    name: typeof legacy.name === 'string' ? legacy.name : 'audio',
+    file: legacy.file instanceof Blob ? (legacy.file as File) : undefined,
+    duration,
+    replaceOriginalAudio: legacy.replaceOriginalAudio ?? false,
+    segments: [segment],
+  };
+}
+
+function normalizeSegment(seg: AudioTrackSegment): AudioTrackSegment {
+  return {
+    id: typeof seg.id === 'string' && seg.id ? seg.id : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    projectStart: Number.isFinite(seg.projectStart) ? Math.max(0, seg.projectStart) : 0,
+    trimStart: Number.isFinite(seg.trimStart) ? Math.max(0, seg.trimStart) : 0,
+    trimEnd: Number.isFinite(seg.trimEnd) ? Math.max(0, seg.trimEnd) : 0,
+    volume: Number.isFinite(seg.volume) ? seg.volume : 100,
+    fadeIn: Number.isFinite(seg.fadeIn) ? Math.max(0, seg.fadeIn) : 0,
+    fadeOut: Number.isFinite(seg.fadeOut) ? Math.max(0, seg.fadeOut) : 0,
+  };
+}
+
+/**
  * Apply backward-compatible defaults to a state that may be missing new fields.
  */
 export function applyStateDefaults(state: Record<string, unknown>): DraftState {
@@ -94,10 +190,7 @@ export function applyStateDefaults(state: Record<string, unknown>): DraftState {
     playbackSpeed: base.playbackSpeed ?? 1,
     transitions: base.transitions ?? [],
     textOverlays: base.textOverlays ?? [],
-    backgroundMusic: base.backgroundMusic ? {
-      ...base.backgroundMusic,
-      replaceOriginalAudio: base.backgroundMusic.replaceOriginalAudio ?? false,
-    } : null,
+    backgroundMusic: migrateBackgroundMusic(base.backgroundMusic as unknown),
     presetName: base.presetName ?? null,
     subtitles: ((base.subtitles ?? []) as SubtitleCue[]).map((cue) => ({
       ...cue,
@@ -133,7 +226,10 @@ function generateId(): string {
 async function readDrafts(): Promise<DraftProject[]> {
   const data = await get(DRAFTS_KEY_V2);
   if (!Array.isArray(data)) return [];
-  return data as DraftProject[];
+  return (data as DraftProject[]).map((project) => ({
+    ...project,
+    state: applyStateDefaults(project.state as unknown as Record<string, unknown>),
+  }));
 }
 
 async function writeDrafts(drafts: DraftProject[]): Promise<void> {

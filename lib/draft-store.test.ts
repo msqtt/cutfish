@@ -8,9 +8,11 @@ import {
   renameDraft,
   migrateFromV1,
   LEGACY_KEY_V1,
+  DRAFTS_KEY_V2,
   type DraftState,
   applyClipDefaults,
   applyStateDefaults,
+  migrateBackgroundMusic,
 } from './draft-store';
 
 // Mock idb-keyval
@@ -259,11 +261,11 @@ describe('backgroundMusic file persistence (B2)', () => {
       ...minimalState,
       backgroundMusic: {
         name: 'track.mp3',
-        volume: 80,
-        loop: true,
-        fadeIn: 1,
-        fadeOut: 2,
+        duration: 12,
         replaceOriginalAudio: false,
+        segments: [
+          { id: 'seg1', projectStart: 0, trimStart: 0, trimEnd: 12, volume: 80, fadeIn: 1, fadeOut: 2 },
+        ],
         file: new File(['audio'], 'track.mp3', { type: 'audio/mpeg' }),
       },
     };
@@ -273,12 +275,98 @@ describe('backgroundMusic file persistence (B2)', () => {
     expect(loaded!.state.backgroundMusic).not.toBeNull();
     expect(loaded!.state.backgroundMusic!.name).toBe('track.mp3');
     expect(loaded!.state.backgroundMusic!.file).toBeInstanceOf(File);
+    expect(loaded!.state.backgroundMusic!.segments).toHaveLength(1);
   });
 
   it('handles null backgroundMusic gracefully', async () => {
     const draft = await createDraft('No Music', minimalState);
     const loaded = await loadDraft(draft.id);
     expect(loaded!.state.backgroundMusic).toBeNull();
+  });
+});
+
+describe('migrateBackgroundMusic (audio track model)', () => {
+  it('returns null for null/invalid input', () => {
+    expect(migrateBackgroundMusic(null)).toBeNull();
+    expect(migrateBackgroundMusic(undefined)).toBeNull();
+    expect(migrateBackgroundMusic('nope')).toBeNull();
+  });
+
+  it('migrates a legacy single-background-music draft into one segment', () => {
+    const file = new File(['audio'], 'bg.mp3', { type: 'audio/mpeg' });
+    const track = migrateBackgroundMusic({
+      name: 'bg.mp3', volume: 60, loop: true, fadeIn: 2, fadeOut: 3,
+      replaceOriginalAudio: true, file,
+    });
+    expect(track).not.toBeNull();
+    expect(track!.name).toBe('bg.mp3');
+    expect(track!.replaceOriginalAudio).toBe(true);
+    expect(track!.file).toBe(file);
+    expect(track!.segments).toHaveLength(1);
+    const seg = track!.segments[0];
+    expect(seg.projectStart).toBe(0);
+    expect(seg.trimStart).toBe(0);
+    expect(seg.volume).toBe(60);
+    expect(seg.fadeIn).toBe(2);
+    expect(seg.fadeOut).toBe(3);
+    // No duration known → trimEnd 0, to be hydrated later.
+    expect(seg.trimEnd).toBe(0);
+  });
+
+  it('uses legacy duration for trimEnd when available and drops loop from timeline', () => {
+    const track = migrateBackgroundMusic({
+      name: 'bg.mp3', volume: 80, loop: true, fadeIn: 0, fadeOut: 0,
+      replaceOriginalAudio: false, duration: 15,
+    });
+    expect(track!.duration).toBe(15);
+    expect(track!.segments[0].trimEnd).toBe(15);
+    // Loop is not represented on the new track/segment shape.
+    expect(track as unknown as Record<string, unknown>).not.toHaveProperty('loop');
+    expect(track!.segments[0] as unknown as Record<string, unknown>).not.toHaveProperty('loop');
+  });
+
+  it('defaults legacy replaceOriginalAudio to false', () => {
+    const track = migrateBackgroundMusic({
+      name: 'bg.mp3', volume: 80, loop: false, fadeIn: 0, fadeOut: 0,
+    });
+    expect(track!.replaceOriginalAudio).toBe(false);
+  });
+
+  it('normalizes an already-migrated track shape', () => {
+    const track = migrateBackgroundMusic({
+      name: 'bg.mp3', duration: 20, replaceOriginalAudio: true,
+      segments: [
+        { id: 's1', projectStart: 3, trimStart: 1, trimEnd: 10, volume: 90, fadeIn: 1, fadeOut: 2 },
+        { id: 's2', projectStart: 12, trimStart: 10, trimEnd: 20, volume: 100, fadeIn: 0, fadeOut: 0 },
+      ],
+    });
+    expect(track!.segments).toHaveLength(2);
+    expect(track!.duration).toBe(20);
+    expect(track!.segments[1].projectStart).toBe(12);
+  });
+
+  it('applyStateDefaults migrates legacy backgroundMusic into a track', () => {
+    const result = applyStateDefaults({
+      clips: [],
+      backgroundMusic: { name: 'x.mp3', volume: 70, loop: false, fadeIn: 0, fadeOut: 0 },
+    } as unknown as Record<string, unknown>);
+    expect(result.backgroundMusic).not.toBeNull();
+    expect(result.backgroundMusic!.segments).toHaveLength(1);
+    expect(result.backgroundMusic!.segments[0].volume).toBe(70);
+  });
+
+  it('migrates a legacy v2 project through the real draft read path', async () => {
+    store[DRAFTS_KEY_V2] = [{
+      id: 'old-v2', name: 'Old', createdAt: 1, updatedAt: 1,
+      state: {
+        ...minimalState,
+        backgroundMusic: { name: 'legacy.mp3', volume: 65, loop: false, fadeIn: 1, fadeOut: 2, replaceOriginalAudio: true },
+      },
+    }];
+    const [project] = await listDrafts();
+    expect(project.state.backgroundMusic?.replaceOriginalAudio).toBe(true);
+    expect(project.state.backgroundMusic?.segments).toHaveLength(1);
+    expect(project.state.backgroundMusic?.segments[0].volume).toBe(65);
   });
 });
 

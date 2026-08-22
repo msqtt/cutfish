@@ -18,7 +18,8 @@ import {
   selectClipsForExportSpeedAware,
   type AudioFadeSettings, type ExportSettings,
   type ExtendedClipMetadata, type TransitionConfig, type TextOverlay,
-  type BgMusicExport, type TtsAudioInput,
+  type TtsAudioInput,
+  type AudioTrackInput,
 } from '@/lib/ffmpeg-utils';
 import { LOCAL_TTS_VOICES, getTtsCacheKey, selectTtsCuesForExport, getVoiceById, getDefaultLocalVoice } from '@/lib/tts-utils';
 import type { LocalTtsVoiceId } from '@/lib/tts-utils';
@@ -35,6 +36,10 @@ import {
 } from '@/lib/draft-store';
 import { PRESETS, getPresetNames, applyPreset, loadCustomPresets, saveCustomPreset, deleteCustomPreset, applyCustomPreset, type CustomPreset } from '@/lib/preset-utils';
 import { selectTextOverlaysForExport } from '@/lib/text-overlay-utils';
+import {
+  selectAudioSegmentsForExport, splitAudioSegment, clampAudioSegmentToSource,
+  type AudioTrackSegment,
+} from '@/lib/audio-track-utils';
 import { computeTransitionAdjustedDuration, type TransitionClip } from '@/lib/transition-utils';
 import {
   type SubtitleCue, type VisualOverlay, type DrawingOverlay, type ImageOverlay,
@@ -77,7 +82,7 @@ export interface EditorState {
   playbackSpeed: number;
   transitions: TransitionConfig[];
   textOverlays: TextOverlay[];
-  backgroundMusic: { name: string; file?: File; url?: string; volume: number; loop: boolean; fadeIn: number; fadeOut: number; replaceOriginalAudio: boolean } | null;
+  backgroundMusic: { name: string; file?: File; url?: string; duration: number; replaceOriginalAudio: boolean; segments: AudioTrackSegment[] } | null;
   presetName: string | null;
   subtitles: SubtitleCue[];
   visualOverlays: VisualOverlay[];
@@ -175,6 +180,22 @@ function getVideoDuration(url: string) {
   });
 }
 
+function getAudioDuration(url: string) {
+  return new Promise<number>((resolve, reject) => {
+    const audio = document.createElement('audio');
+    const cleanup = () => { audio.removeAttribute('src'); audio.load(); };
+    audio.preload = 'metadata';
+    audio.onloadedmetadata = () => {
+      const duration = audio.duration;
+      cleanup();
+      if (Number.isFinite(duration) && duration > 0) resolve(duration);
+      else reject(new Error('Invalid duration'));
+    };
+    audio.onerror = () => { cleanup(); reject(new Error('Unreadable audio')); };
+    audio.src = url;
+  });
+}
+
 function fileIdentity(file: File) {
   return `${file.name}::${file.size}::${file.lastModified}`;
 }
@@ -214,11 +235,9 @@ function editorStateToDraft(state: EditorState): DraftState {
     textOverlays: state.textOverlays,
     backgroundMusic: state.backgroundMusic ? {
       name: state.backgroundMusic.name,
-      volume: state.backgroundMusic.volume,
-      loop: state.backgroundMusic.loop,
-      fadeIn: state.backgroundMusic.fadeIn,
-      fadeOut: state.backgroundMusic.fadeOut,
+      duration: state.backgroundMusic.duration,
       replaceOriginalAudio: state.backgroundMusic.replaceOriginalAudio,
+      segments: state.backgroundMusic.segments,
       file: state.backgroundMusic.file,
     } : null,
     presetName: state.presetName,
@@ -259,8 +278,10 @@ function draftToEditorState(draft: DraftState, createUrl: (file: Blob) => string
     transitions: (draft.transitions ?? []) as TransitionConfig[],
     textOverlays: (draft.textOverlays ?? []) as TextOverlay[],
     backgroundMusic: draft.backgroundMusic ? {
-      ...draft.backgroundMusic,
+      name: draft.backgroundMusic.name,
+      duration: draft.backgroundMusic.duration ?? 0,
       replaceOriginalAudio: draft.backgroundMusic.replaceOriginalAudio ?? false,
+      segments: draft.backgroundMusic.segments ?? [],
       file: draft.backgroundMusic.file instanceof Blob ? draft.backgroundMusic.file as File : undefined,
       url: draft.backgroundMusic.file instanceof Blob ? createUrl(draft.backgroundMusic.file as File) : undefined,
     } : null,
@@ -303,6 +324,8 @@ export default function Editor() {
   const [lastSavedTime, setLastSavedTime] = useState<number | null>(null);
   const [renamingClipId, setRenamingClipId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  // Audio timeline: currently selected segment (UI-only, not persisted to draft).
+  const [selectedAudioSegmentId, setSelectedAudioSegmentId] = useState<string | null>(null);
 
   // Subtitle/overlay state
   const [editingSubtitleId, setEditingSubtitleId] = useState<string | null>(null);
@@ -330,6 +353,7 @@ export default function Editor() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
+  const audioReplaceInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const exportDialogRef = useRef<HTMLDivElement>(null);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
@@ -355,6 +379,12 @@ export default function Editor() {
   const lastTtsCueIdRef = useRef<string | null>(null);
 
   const activeClip = state.clips.find((clip) => clip.id === state.activeClipId);
+  // Effective (validated) audio selection: falls back to null when the selected
+  // segment no longer exists (deleted/undone). Derived to avoid setState-in-effect.
+  const effectiveSelectedAudioSegmentId =
+    selectedAudioSegmentId && (state.backgroundMusic?.segments ?? []).some((s) => s.id === selectedAudioSegmentId)
+      ? selectedAudioSegmentId
+      : null;
   const projectDurationSpeedAware = getProjectDurationSpeedAware(state.clips);
   // M1: Compute transition-adjusted output duration
   const transitionClips: TransitionClip[] = state.clips.map((clip) => ({
@@ -612,20 +642,72 @@ export default function Editor() {
 
   // ─── Background Audio Import ─────────────────────────────────────────────
 
-  const importBackgroundAudio = useCallback(async (file: File) => {
+  const importBackgroundAudio = useCallback(async (file: File, replaceSource = false) => {
     if (!file.type.startsWith('audio/') && !/\.(mp3|wav|ogg|aac|flac|m4a)$/i.test(file.name)) {
       setToast({ kind: 'error', message: t('invalid_audio') });
       return;
     }
     const url = createTrackedUrl(file);
+
+    // Read the real source duration from local metadata (no upload).
+    let duration = 0;
+    try {
+      duration = await getAudioDuration(url);
+    } catch {
+      duration = 0; // Unknown; will be hydrated later.
+    }
+    const effectiveDuration = duration > 0 ? duration : 0;
+
+    // Replace only the source File/duration, keeping every existing segment
+    // (re-clamped to the new source length). Used by the "replace source" action.
+    if (replaceSource && state.backgroundMusic) {
+      updateState((current) => {
+        const track = current.backgroundMusic;
+        if (!track) return current;
+        const clampDuration = effectiveDuration > 0 ? effectiveDuration : (track.duration || 0.01);
+        const segments = track.segments.map((s) =>
+          effectiveDuration > 0 ? clampAudioSegmentToSource(s, clampDuration) : s,
+        );
+        return {
+          ...current,
+          backgroundMusic: { ...track, name: file.name, file, url, duration: effectiveDuration, segments },
+        };
+      });
+      return;
+    }
+
+    // Segment starts at the current playhead (project time), clamped so it does
+    // not exceed the project timeline. With no clips, start at 0.
+    const projectDuration = getProjectDurationSpeedAware(state.clips);
+    let projectStart = Math.max(0, previewProjectTime);
+    if (projectDuration > 0 && effectiveDuration > 0) {
+      projectStart = Math.max(0, Math.min(projectStart, Math.max(0, projectDuration - effectiveDuration)));
+    } else if (projectDuration > 0) {
+      projectStart = Math.max(0, Math.min(projectStart, projectDuration));
+    }
+
+    const segment: AudioTrackSegment = {
+      id: crypto.randomUUID(),
+      projectStart,
+      trimStart: 0,
+      trimEnd: effectiveDuration,
+      volume: 80,
+      fadeIn: 0,
+      fadeOut: 0,
+    };
+    const newTrackId = segment.id;
+
     updateState((current) => ({
       ...current,
       backgroundMusic: {
         name: file.name, file, url,
-        volume: 80, loop: false, fadeIn: 0, fadeOut: 0, replaceOriginalAudio: false,
+        duration: effectiveDuration,
+        replaceOriginalAudio: current.backgroundMusic?.replaceOriginalAudio ?? false,
+        segments: [segment],
       },
     }));
-  }, [createTrackedUrl, t, updateState]);
+    setSelectedAudioSegmentId(newTrackId);
+  }, [createTrackedUrl, previewProjectTime, state.clips, state.backgroundMusic, t, updateState]);
 
   // ─── Clip Actions ────────────────────────────────────────────────────────
 
@@ -682,6 +764,140 @@ export default function Editor() {
       return clips === current.clips ? current : { ...current, clips, activeClipId: newId };
     });
   }, [activeClip, canSplit, currentTime, t, updateState]);
+
+  // ─── Audio Track Segment Actions ──────────────────────────────────────────
+
+  /**
+   * Split the audio-track segment covering the given project time. The right
+   * half reuses the same source File (segments only reference offsets into the
+   * one track File), so no additional media is written.
+   */
+  const splitAudioSegmentAt = useCallback((segmentId: string, projectTime: number) => {
+    updateState((current) => {
+      const track = current.backgroundMusic;
+      if (!track) return current;
+      let changed = false;
+      const segments = track.segments.flatMap((seg) => {
+        if (seg.id !== segmentId) return [seg];
+        const parts = splitAudioSegment(seg, projectTime, crypto.randomUUID());
+        if (!parts) return [seg];
+        changed = true;
+        return parts;
+      });
+      if (!changed) return current;
+      return { ...current, backgroundMusic: { ...track, segments } };
+    });
+  }, [updateState]);
+
+  /** Add another full-source segment at the current project playhead. */
+  const addAudioSegment = useCallback(() => {
+    const id = crypto.randomUUID();
+    updateState((current) => {
+      const track = current.backgroundMusic;
+      if (!track) return current;
+      const projectDuration = getProjectDurationSpeedAware(current.clips);
+      const projectStart = Math.max(0, Math.min(previewProjectTime, projectDuration || previewProjectTime));
+      const segment: AudioTrackSegment = {
+        id,
+        projectStart,
+        trimStart: 0,
+        trimEnd: track.duration,
+        volume: 80,
+        fadeIn: 0,
+        fadeOut: 0,
+      };
+      return { ...current, backgroundMusic: { ...track, segments: [...track.segments, segment] } };
+    });
+    setSelectedAudioSegmentId(id);
+  }, [previewProjectTime, updateState]);
+
+  /** Delete a segment from the audio track by id. */
+  const deleteAudioSegment = useCallback((segmentId: string) => {
+    updateState((current) => {
+      const track = current.backgroundMusic;
+      if (!track) return current;
+      const segments = track.segments.filter((s) => s.id !== segmentId);
+      return { ...current, backgroundMusic: { ...track, segments } };
+    });
+  }, [updateState]);
+
+  /**
+   * Move a segment along the project timeline. Persists `projectStart` in
+   * project seconds (>= 0), not pixels. Uses replaceState so a continuous drag
+   * or a run of keyboard nudges collapses into a single history checkpoint
+   * (see beginContinuousEdit/finishContinuousEdit wired on the Timeline).
+   */
+  const moveAudioSegment = useCallback((segmentId: string, projectStart: number) => {
+    const next = Math.max(0, Number.isFinite(projectStart) ? projectStart : 0);
+    replaceState((current) => {
+      const track = current.backgroundMusic;
+      if (!track) return current;
+      const segments = track.segments.map((s) =>
+        s.id === segmentId ? { ...s, projectStart: next } : s,
+      );
+      return { ...current, backgroundMusic: { ...track, segments } };
+    });
+  }, [replaceState]);
+
+  const selectAudioSegment = useCallback((segmentId: string | null) => {
+    setSelectedAudioSegmentId(segmentId);
+    if (segmentId) setInspectorTab('audio');
+  }, []);
+
+  /**
+   * Transient segment edit used by continuous inspector controls (sliders).
+   * Uses replaceState so a slider drag collapses into a single history entry
+   * via beginContinuousEdit/finishContinuousEdit.
+   */
+  const editAudioSegmentTransient = useCallback((segmentId: string, patch: Partial<AudioTrackSegment>) => {
+    replaceState((current) => {
+      const track = current.backgroundMusic;
+      if (!track) return current;
+      const segments = track.segments.map((s) =>
+        s.id === segmentId
+          ? clampAudioSegmentToSource({ ...s, ...patch }, track.duration || (s.trimEnd || 0.01))
+          : s,
+      );
+      return { ...current, backgroundMusic: { ...track, segments } };
+    });
+  }, [replaceState]);
+
+  // Keep the selected segment id valid as segments change (delete/undo).
+  // Derived at render (see `effectiveSelectedAudioSegmentId`) rather than via an
+  // effect, to avoid a cascading setState-in-effect.
+
+  /**
+   * Hydrate legacy/unknown audio tracks whose `duration` is 0 (imported before
+   * duration metadata existed, or migrated from the legacy background-music
+   * model). Reads the real source duration from the local object URL and patches
+   * the track + any zero-length segments via replaceState (no new history entry).
+   */
+  const hydratingAudioRef = useRef(false);
+  useEffect(() => {
+    const track = state.backgroundMusic;
+    if (!track || hydratingAudioRef.current) return;
+    if (track.duration > 0 || !track.url) return;
+    hydratingAudioRef.current = true;
+    let cancelled = false;
+    void getAudioDuration(track.url)
+      .then((duration) => {
+        if (cancelled || !(duration > 0)) return;
+        replaceState((current) => {
+          const cur = current.backgroundMusic;
+          if (!cur || cur.duration > 0) return current;
+          const segments = cur.segments.map((s) =>
+            clampAudioSegmentToSource(
+              { ...s, trimEnd: s.trimEnd > 0 ? s.trimEnd : duration },
+              duration,
+            ),
+          );
+          return { ...current, backgroundMusic: { ...cur, duration, segments } };
+        });
+      })
+      .catch(() => { /* leave duration unknown */ })
+      .finally(() => { hydratingAudioRef.current = false; });
+    return () => { cancelled = true; };
+  }, [state.backgroundMusic, replaceState]);
 
   const renameClip = useCallback((id: string, newName: string) => {
     if (!newName.trim()) return;
@@ -844,21 +1060,35 @@ export default function Editor() {
         metadata.push(clipToExtendedMetadata(clip, filename, hasAudio));
       }
 
-      // Write background audio if present
-      let bgMusicExport: BgMusicExport | null = null;
-      if (state.backgroundMusic?.file) {
-        const bgExt = state.backgroundMusic.name.split('.').pop()?.replace(/[^a-z0-9]/gi, '') || 'mp3';
+      // Write background audio-track source (once) and build per-segment inputs.
+      let audioTrackInputs: AudioTrackInput[] = [];
+      const track = state.backgroundMusic;
+      const audioTrackReplaceOriginal = track?.replaceOriginalAudio === true;
+      if (track?.file && track.segments.length > 0) {
+        const bgExt = track.name.split('.').pop()?.replace(/[^a-z0-9]/gi, '') || 'mp3';
         const bgFilename = `bg-audio.${bgExt}`;
+        // Source File is written to MEMFS exactly once.
         temporaryFiles.push(bgFilename);
-        await engine.writeFile(bgFilename, await fetchFile(state.backgroundMusic.file));
-        bgMusicExport = {
+        await engine.writeFile(bgFilename, await fetchFile(track.file));
+
+        const exportSegments = selectAudioSegmentsForExport(
+          track.segments,
+          effectiveStart,
+          effectiveEnd,
+        );
+        // First audio-track input index is right after the video clips.
+        const audioBaseIndex = metadata.length;
+        audioTrackInputs = exportSegments.map((seg, i): AudioTrackInput => ({
           filename: bgFilename,
-          volume: state.backgroundMusic.volume,
-          loop: state.backgroundMusic.loop,
-          fadeIn: state.backgroundMusic.fadeIn,
-          fadeOut: state.backgroundMusic.fadeOut,
-          replaceOriginalAudio: state.backgroundMusic.replaceOriginalAudio,
-        };
+          inputIndex: audioBaseIndex + i,
+          startTime: seg.startTime,
+          endTime: seg.endTime,
+          sourceTrimStart: seg.sourceTrimStart,
+          sourceTrimEnd: seg.sourceTrimEnd,
+          volume: seg.volume,
+          fadeIn: seg.fadeIn,
+          fadeOut: seg.fadeOut,
+        }));
       }
 
       if (cancelRequestedRef.current) return;
@@ -967,10 +1197,12 @@ export default function Editor() {
           state.canvasFit,
           state.transitions,
           exportTextOverlays,
-          bgMusicExport,
+          null,
           undefined,
           overlayPngs,
           ttsAudioInputs,
+          audioTrackInputs,
+          audioTrackReplaceOriginal,
         ),
       );
       if (exitCode !== 0) throw new Error(`FFmpeg exited with code ${exitCode}`);
@@ -1553,6 +1785,7 @@ export default function Editor() {
     <div className="flex h-dvh min-h-[560px] flex-col overflow-hidden bg-[var(--app)] text-[var(--text)]">
       <input ref={fileInputRef} type="file" accept="video/*" multiple className="sr-only" onChange={(event) => { void importFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
       <input ref={audioInputRef} type="file" accept="audio/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) void importBackgroundAudio(f); event.target.value = ''; }} />
+      <input ref={audioReplaceInputRef} type="file" accept="audio/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) void importBackgroundAudio(f, true); event.target.value = ''; }} />
       <input ref={imageInputRef} type="file" accept="image/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) importImageOverlay(f); event.target.value = ''; }} aria-label={t('add_image')} />
 
       {/* ─── Header ──────────────────────────────────────────────────────── */}
@@ -2042,29 +2275,67 @@ export default function Editor() {
                 {/* Background Audio */}
                 <section aria-labelledby="bg-audio-heading">
                   <h2 id="bg-audio-heading" className="mb-3 text-sm font-semibold">{t('background_audio')}</h2>
-                  {state.backgroundMusic ? (
+                  {state.backgroundMusic ? (() => {
+                    const track = state.backgroundMusic;
+                    const selectedSegment = track.segments.find((s) => s.id === effectiveSelectedAudioSegmentId) ?? track.segments[0] ?? null;
+                    const sourceDuration = track.duration > 0 ? track.duration : (selectedSegment ? Math.max(0.01, selectedSegment.trimEnd) : 0.01);
+                    return (
                     <div className="space-y-3">
                       <div className="flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--raised)] p-2">
-                        <Music className="h-4 w-4 text-indigo-500 shrink-0" />
-                        <span className="flex-1 truncate text-xs">{state.backgroundMusic.name}</span>
-                        <button onClick={() => updateState((c) => ({ ...c, backgroundMusic: null }))} className="text-red-500 hover:text-red-400" aria-label={t('remove_audio')}><Trash2 className="h-3.5 w-3.5" /></button>
+                        <Music className="h-4 w-4 shrink-0 text-indigo-500" />
+                        <span className="flex-1 truncate text-xs" title={track.name}>{track.name}</span>
+                        <button type="button" onClick={() => audioReplaceInputRef.current?.click()} className="text-[var(--muted)] hover:text-indigo-500" aria-label={t('replace_audio_source')} title={t('replace_audio_source')}><Upload className="h-3.5 w-3.5" /></button>
+                        <button type="button" onClick={() => { updateState((c) => ({ ...c, backgroundMusic: null })); setSelectedAudioSegmentId(null); }} className="text-red-500 hover:text-red-400" aria-label={t('remove_audio')}><Trash2 className="h-3.5 w-3.5" /></button>
                       </div>
+
                       <div className="rounded border border-indigo-500/30 bg-indigo-500/5 p-2.5">
                         <label className="flex items-start gap-2 text-xs font-medium text-[var(--text)]">
-                          <input type="checkbox" checked={state.backgroundMusic.replaceOriginalAudio} onChange={(e) => updateState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, replaceOriginalAudio: e.target.checked } : null }))} aria-describedby="replace-original-audio-hint" className="mt-0.5 accent-indigo-500" />
+                          <input type="checkbox" checked={track.replaceOriginalAudio} onChange={(e) => updateState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, replaceOriginalAudio: e.target.checked } : null }))} aria-describedby="replace-original-audio-hint" className="mt-0.5 accent-indigo-500" />
                           <span>{t('replace_original_audio')}</span>
                         </label>
                         <p id="replace-original-audio-hint" className="mt-1.5 text-xs leading-4 text-[var(--muted)]">{t('replace_original_audio_hint')}</p>
                       </div>
-                      <RangeControl label={t('audio_volume')} value={state.backgroundMusic.volume} min={0} max={200} onChange={(v) => replaceState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, volume: v } : null }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
-                      <label className="flex items-center gap-2 text-xs text-[var(--muted)]">
-                        <input type="checkbox" checked={state.backgroundMusic.loop} onChange={(e) => updateState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, loop: e.target.checked } : null }))} className="accent-indigo-500" />
-                        {t('audio_loop')}
-                      </label>
-                      <RangeControl label={t('audio_fade_in')} value={state.backgroundMusic.fadeIn} min={0} max={10} step={0.1} unit="s" onChange={(v) => replaceState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, fadeIn: v } : null }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
-                      <RangeControl label={t('audio_fade_out')} value={state.backgroundMusic.fadeOut} min={0} max={10} step={0.1} unit="s" onChange={(v) => replaceState((c) => ({ ...c, backgroundMusic: c.backgroundMusic ? { ...c.backgroundMusic, fadeOut: v } : null }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+
+                      {/* Segment list */}
+                      <div role="listbox" aria-label={t('audio_segments')} className="space-y-1.5">
+                        <p className="text-xs font-medium text-[var(--muted)]">{t('audio_segments')} · {track.segments.length}</p>
+                        {track.segments.map((seg, i) => {
+                          const dur = Math.max(0, seg.trimEnd - seg.trimStart);
+                          const active = selectedSegment?.id === seg.id;
+                          return (
+                            <div key={seg.id} className={`flex items-center gap-2 rounded border px-2 py-1.5 text-xs ${active ? 'border-emerald-400 bg-emerald-500/10' : 'border-[var(--border)] bg-[var(--raised)]'}`}>
+                              <button type="button" role="option" aria-selected={active} onClick={() => setSelectedAudioSegmentId(seg.id)} className="flex-1 truncate text-left">
+                                <span className="font-medium">{t('audio_segment_n', { n: i + 1 })}</span>
+                                <span className="ml-2 font-mono text-[var(--muted)]">{seg.projectStart.toFixed(1)}s · {dur.toFixed(1)}s</span>
+                              </button>
+                              <button type="button" onClick={() => { deleteAudioSegment(seg.id); if (selectedAudioSegmentId === seg.id) setSelectedAudioSegmentId(null); }} className="text-red-500 hover:text-red-400" aria-label={t('delete_audio_segment', { n: i + 1 })}><Trash2 className="h-3 w-3" /></button>
+                            </div>
+                          );
+                        })}
+                        {track.segments.length === 0 && <p className="text-xs text-[var(--muted)]">{t('no_audio_segments')}</p>}
+                      </div>
+
+                      {/* Segment tools */}
+                      <div className="flex gap-2">
+                        <button type="button" disabled={!selectedSegment || previewProjectTime <= selectedSegment.projectStart + 0.01 || previewProjectTime >= selectedSegment.projectStart + (selectedSegment.trimEnd - selectedSegment.trimStart) - 0.01} onClick={() => { if (selectedSegment) splitAudioSegmentAt(selectedSegment.id, previewProjectTime); }} className="flex flex-1 items-center justify-center gap-1.5 rounded border border-[var(--border)] px-2 py-1.5 text-xs hover:border-indigo-500 hover:text-indigo-500 disabled:cursor-not-allowed disabled:opacity-40" aria-label={t('split_audio_segment')} title={t('split_audio_segment')}><Scissors className="h-3.5 w-3.5" />{t('split')}</button>
+                        <button type="button" onClick={addAudioSegment} className="flex flex-1 items-center justify-center gap-1.5 rounded border border-[var(--border)] px-2 py-1.5 text-xs hover:border-indigo-500 hover:text-indigo-500" aria-label={t('add_audio_segment')} title={t('add_audio_segment')}><Plus className="h-3.5 w-3.5" />{t('add_audio_segment')}</button>
+                      </div>
+
+                      {/* Selected segment editor */}
+                      {selectedSegment && (
+                        <div className="space-y-4 rounded border border-emerald-500/30 bg-emerald-500/5 p-2.5" aria-label={t('selected_segment')}>
+                          <p className="text-xs font-semibold text-[var(--text)]">{t('selected_segment')}</p>
+                          <RangeControl label={t('audio_project_start')} value={selectedSegment.projectStart} min={0} max={Math.max(projectDurationSpeedAware, selectedSegment.projectStart, 1)} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { projectStart: Math.max(0, v) })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                          <RangeControl label={t('audio_trim_start')} value={selectedSegment.trimStart} min={0} max={Math.max(0, sourceDuration - 0.01)} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { trimStart: Math.min(v, selectedSegment.trimEnd - 0.01) })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                          <RangeControl label={t('audio_trim_end')} value={selectedSegment.trimEnd} min={selectedSegment.trimStart + 0.01} max={sourceDuration} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { trimEnd: Math.max(v, selectedSegment.trimStart + 0.01) })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                          <RangeControl label={t('audio_volume')} value={selectedSegment.volume} min={0} max={200} onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { volume: v })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                          <RangeControl label={t('audio_fade_in')} value={selectedSegment.fadeIn} min={0} max={Math.max(0.1, selectedSegment.trimEnd - selectedSegment.trimStart)} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { fadeIn: v })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                          <RangeControl label={t('audio_fade_out')} value={selectedSegment.fadeOut} min={0} max={Math.max(0.1, selectedSegment.trimEnd - selectedSegment.trimStart)} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { fadeOut: v })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                        </div>
+                      )}
                     </div>
-                  ) : (
+                    );
+                  })() : (
                     <button onClick={() => audioInputRef.current?.click()} className="flex w-full items-center justify-center gap-2 rounded border border-dashed border-[var(--border)] px-3 py-3 text-xs text-[var(--muted)] hover:border-indigo-500 hover:text-indigo-500">
                       <Music className="h-4 w-4" />{t('import_audio')}
                     </button>
@@ -2385,7 +2656,7 @@ export default function Editor() {
       </div>
 
       {/* ─── Timeline ────────────────────────────────────────────────────── */}
-      <footer className={`flex shrink-0 flex-col border-t border-[var(--border)] bg-[var(--panel)] transition-all ${timelineCollapsed ? 'h-10' : 'sm:h-48 lg:h-52 h-40'}`}>
+      <footer className={`flex shrink-0 flex-col border-t border-[var(--border)] bg-[var(--panel)] transition-all ${timelineCollapsed ? 'h-10' : (state.backgroundMusic ? 'h-52 sm:h-60 lg:h-64' : 'h-40 sm:h-48 lg:h-52')}`}>
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border)] px-3 text-xs text-[var(--muted)] sm:px-4">
           <button onClick={() => setTimelineCollapsed(!timelineCollapsed)} className={iconButton} aria-label={timelineCollapsed ? t('expand_timeline') : t('collapse_timeline')}>
             {timelineCollapsed ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
@@ -2411,6 +2682,18 @@ export default function Editor() {
               onReorder={reorderClip}
               zoom={timelineZoom}
               onZoomChange={setTimelineZoom}
+              audioSegments={(state.backgroundMusic?.segments ?? []).map((s) => ({
+                id: s.id,
+                name: state.backgroundMusic!.name,
+                projectStart: s.projectStart,
+                trimStart: s.trimStart,
+                trimEnd: s.trimEnd,
+              }))}
+              selectedAudioSegmentId={effectiveSelectedAudioSegmentId}
+              onSelectAudioSegment={selectAudioSegment}
+              onAudioSegmentMove={moveAudioSegment}
+              onAudioEditStart={beginContinuousEdit}
+              onAudioEditEnd={finishContinuousEdit}
             />
           ) : <div className="flex flex-1 items-center justify-center text-xs text-[var(--muted)]">{t('no_media')}</div>
         )}
