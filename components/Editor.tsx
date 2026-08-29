@@ -2810,7 +2810,7 @@ export default function Editor() {
           </button>
           {!timelineCollapsed && <button type="button" onClick={() => setMaximizedPanel(maximizedPanel === 'timeline' ? null : 'timeline')} className={iconButton} aria-pressed={maximizedPanel === 'timeline'} aria-label={maximizedPanel === 'timeline' ? t('restore_panel') : t('maximize_panel')} title={maximizedPanel === 'timeline' ? t('restore_panel') : t('maximize_panel')}>{maximizedPanel === 'timeline' ? <Minimize className="h-3.5 w-3.5" /> : <Maximize className="h-3.5 w-3.5" />}</button>}
           <span><strong className="text-[var(--text)]">V1</strong> {t('video_track')}</span>
-          <span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('audio_track')}</span>
+          <span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('source_audio_track')}</span>
           <span className="ml-auto hidden font-mono sm:inline">{t('project_duration', { value: projectDurationSpeedAware.toFixed(1) })}{state.transitions.length > 0 && outputDuration < projectDurationSpeedAware - 0.01 ? ` · ${t('output_duration', { value: outputDuration.toFixed(1) })}` : ''}</span>
           {/* Zoom controls */}
           <div className="flex items-center gap-0.5">
@@ -2823,7 +2823,7 @@ export default function Editor() {
         {!timelineCollapsed && (
           state.clips.length ? (
             <Timeline
-              clips={state.clips.map((c) => ({ id: c.id, name: c.displayName, trimStart: c.trimStart, trimEnd: c.trimEnd, speed: c.speed }))}
+              clips={state.clips.map((c) => ({ id: c.id, name: c.displayName, trimStart: c.trimStart, trimEnd: c.trimEnd, speed: c.speed, volume: c.volume, muted: c.muted }))}
               activeClipId={state.activeClipId}
               currentTime={currentTime}
               onSeek={seekTimeline}

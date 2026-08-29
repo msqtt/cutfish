@@ -36,3 +36,24 @@ export function moveTimedRange(
     : Math.max(0, Math.min(maxStart, finiteTarget));
   return { startTime: nextStart, endTime: nextStart + duration };
 }
+
+export type VisibleTimelineTrack = 'video' | 'source-audio' | 'background-audio' | 'subtitle' | 'image' | 'effect';
+
+export interface TimelineTrackAvailability {
+  hasVideo: boolean;
+  hasBackgroundAudio: boolean;
+  hasSubtitles: boolean;
+  hasImages: boolean;
+  hasEffects: boolean;
+}
+
+/** Resolve timeline rows from current project content; empty optional rows stay hidden. */
+export function resolveVisibleTimelineTracks(availability: TimelineTrackAvailability): VisibleTimelineTrack[] {
+  if (!availability.hasVideo) return [];
+  const tracks: VisibleTimelineTrack[] = ['video', 'source-audio'];
+  if (availability.hasBackgroundAudio) tracks.push('background-audio');
+  if (availability.hasSubtitles) tracks.push('subtitle');
+  if (availability.hasImages) tracks.push('image');
+  if (availability.hasEffects) tracks.push('effect');
+  return tracks;
+}

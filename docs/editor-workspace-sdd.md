@@ -7,8 +7,8 @@ Expose video, audio, subtitle, image, and effect elements on one project-time ti
 ## Component architecture
 
 - `Editor` owns persisted edit data and ephemeral workspace layout state. Layout state is intentionally not added to `DraftState`.
-- `Timeline` renders five labelled rows on the same project-time/pixel mapping. Video remains reorderable; audio and timed overlay items can be selected and moved while preserving duration.
-- `workspace-utils` contains browser-independent clamping/resizing and timed-range movement. React pointer handlers only translate pointer deltas and call these functions.
+- `Timeline` always renders V1 plus an aligned A1 source-audio row when clips exist. A2 background audio, subtitle, image, and effect rows are created only while they contain project elements. Video remains reorderable; background audio and timed overlay items can be selected and moved while preserving duration.
+- `workspace-utils` contains browser-independent clamping/resizing, timed-range movement, and the content-driven visible-track resolver. React pointer handlers only translate pointer deltas and call these functions.
 - The preview canvas element, not the center workspace section, owns `previewCanvasRef` and receives `requestFullscreen()`. `fullscreenchange` derives UI state from that exact element.
 
 ## State shape

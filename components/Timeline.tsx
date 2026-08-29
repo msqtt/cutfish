@@ -7,6 +7,7 @@ import {
   pixelToProjectTime as computePixelToProjectTime,
   type TimelineClipLayout,
 } from '@/lib/audio-track-utils';
+import { resolveVisibleTimelineTracks } from '@/lib/workspace-utils';
 
 export interface TimelineItem {
   id: string;
@@ -14,6 +15,8 @@ export interface TimelineItem {
   trimStart: number;
   trimEnd: number;
   speed?: number;
+  volume?: number;
+  muted?: boolean;
 }
 
 export interface TimelineAudioSegment {
@@ -91,6 +94,13 @@ export default function Timeline({
   const autoFollowRef = useRef(true);
 
   const projectDuration = clips.reduce((sum, clip) => sum + getPlaybackDuration(clip), 0);
+  const visibleTracks = resolveVisibleTimelineTracks({
+    hasVideo: clips.length > 0,
+    hasBackgroundAudio: audioSegments.length > 0,
+    hasSubtitles: subtitleItems.length > 0,
+    hasImages: imageItems.length > 0,
+    hasEffects: effectItems.length > 0,
+  });
   const clipLayout: TimelineClipLayout[] = clips.map((clip) => {
     const playbackDuration = getPlaybackDuration(clip);
     return { playbackDuration, clipPx: Math.max(CLIP_MIN_PX, playbackDuration * PX_PER_SECOND * zoom) };
@@ -352,25 +362,53 @@ export default function Timeline({
         </div>
       </div>
 
-      <div className="flex h-10 shrink-0" role="group" aria-label={t('audio_track')}>
-        {trackLabel('A1', t('audio_track'))}
-        <div className="relative h-full shrink-0 border-b border-[var(--border)]/60" style={{ width: `${trackWidth}px`, minWidth: `calc(100% - ${TRACK_LABEL_PX}px)` }} onPointerDown={() => onSelectAudioSegment?.(null)}>
-          {audioSegments.length === 0 && <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-[var(--muted)]/70">{t('empty_track')}</span>}
-          {audioSegments.map((segment) => {
-            const duration = getAudioSegmentDuration(segment);
-            const left = projectTimeToPixel(segment.projectStart);
-            const width = Math.max(24, projectTimeToPixel(segment.projectStart + duration) - left);
-            const selected = selectedAudioSegmentId === segment.id;
-            return (
-              <button key={segment.id} type="button" aria-pressed={selected} aria-label={t('timeline_audio_label', { name: segment.name, start: segment.projectStart.toFixed(2), duration: duration.toFixed(2) })} aria-describedby="timeline-audio-help" title={segment.name} style={{ left: `${left}px`, width: `${width}px` }} className={`absolute inset-y-1 flex cursor-grab touch-none items-center overflow-hidden rounded border bg-gradient-to-r from-emerald-500/35 to-teal-500/20 px-2 text-left text-[10px] font-medium text-emerald-100 transition active:cursor-grabbing ${selected ? 'border-emerald-300 ring-2 ring-emerald-300/60' : 'border-emerald-600/50 hover:border-emerald-400'} ${draggingAudioId === segment.id ? 'opacity-70' : ''}`} onPointerDown={(event) => handleAudioDrag(event, segment)} onClick={(event) => { event.stopPropagation(); onSelectAudioSegment?.(segment.id); }} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.stopPropagation(); onAudioEditStart?.(); onAudioSegmentMove?.(segment.id, Math.max(0, segment.projectStart + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1))); }} onBlur={() => onAudioEditEnd?.()}><span className="truncate">{segment.name}</span></button>
-            );
-          })}
+      {visibleTracks.includes('source-audio') && (
+        <div className="flex h-10 shrink-0" role="group" aria-label={t('source_audio_track')}>
+          {trackLabel('A1', t('source_audio_track'))}
+          <div className="flex h-full shrink-0 items-center gap-2 border-b border-[var(--border)]/60" role="list" style={{ width: `${trackWidth}px`, minWidth: `calc(100% - ${TRACK_LABEL_PX}px)` }}>
+            {clips.map((clip) => {
+              const duration = getPlaybackDuration(clip);
+              const muted = clip.muted === true || (clip.volume ?? 100) <= 0;
+              return (
+                <button
+                  key={clip.id}
+                  type="button"
+                  role="listitem"
+                  aria-label={t('timeline_source_audio_label', { name: clip.name, volume: clip.volume ?? 100, state: muted ? t('muted_state') : t('audible_state') })}
+                  title={`${clip.name} · ${muted ? t('muted_state') : `${clip.volume ?? 100}%`}`}
+                  style={{ width: `${Math.max(CLIP_MIN_PX, duration * PX_PER_SECOND * zoom)}px` }}
+                  className={`relative h-8 shrink-0 overflow-hidden rounded border px-2 text-left text-[10px] transition ${activeClipId === clip.id ? 'border-amber-300 ring-1 ring-amber-300/60' : 'border-amber-600/50 hover:border-amber-400'} ${muted ? 'bg-amber-950/20 text-amber-200/45' : 'bg-gradient-to-r from-amber-500/30 via-orange-500/20 to-amber-500/30 text-amber-100'}`}
+                  onClick={() => onSeek(clip.id, clip.trimStart)}
+                >
+                  <span className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-current opacity-30" aria-hidden="true" />
+                  <span className="relative flex items-center justify-between gap-2"><span className="truncate">{clip.name}</span><span className="shrink-0 font-mono">{muted ? t('muted_state') : `${clip.volume ?? 100}%`}</span></span>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
 
-      {renderTimedTrack('subtitle', 'S1', t('subtitle_track'), subtitleItems, 'border-sky-500/60 bg-sky-500/25 text-sky-100 hover:border-sky-300')}
-      {renderTimedTrack('image', 'I1', t('image_track'), imageItems, 'border-fuchsia-500/60 bg-fuchsia-500/25 text-fuchsia-100 hover:border-fuchsia-300')}
-      {renderTimedTrack('effect', 'FX', t('effect_track'), effectItems, 'border-violet-500/60 bg-violet-500/25 text-violet-100 hover:border-violet-300')}
+      {visibleTracks.includes('background-audio') && (
+        <div className="flex h-10 shrink-0" role="group" aria-label={t('background_audio_track')}>
+          {trackLabel('A2', t('background_audio_track'))}
+          <div className="relative h-full shrink-0 border-b border-[var(--border)]/60" style={{ width: `${trackWidth}px`, minWidth: `calc(100% - ${TRACK_LABEL_PX}px)` }} onPointerDown={() => onSelectAudioSegment?.(null)}>
+            {audioSegments.map((segment) => {
+              const duration = getAudioSegmentDuration(segment);
+              const left = projectTimeToPixel(segment.projectStart);
+              const width = Math.max(24, projectTimeToPixel(segment.projectStart + duration) - left);
+              const selected = selectedAudioSegmentId === segment.id;
+              return (
+                <button key={segment.id} type="button" aria-pressed={selected} aria-label={t('timeline_audio_label', { name: segment.name, start: segment.projectStart.toFixed(2), duration: duration.toFixed(2) })} aria-describedby="timeline-audio-help" title={segment.name} style={{ left: `${left}px`, width: `${width}px` }} className={`absolute inset-y-1 flex cursor-grab touch-none items-center overflow-hidden rounded border bg-gradient-to-r from-emerald-500/35 to-teal-500/20 px-2 text-left text-[10px] font-medium text-emerald-100 transition active:cursor-grabbing ${selected ? 'border-emerald-300 ring-2 ring-emerald-300/60' : 'border-emerald-600/50 hover:border-emerald-400'} ${draggingAudioId === segment.id ? 'opacity-70' : ''}`} onPointerDown={(event) => handleAudioDrag(event, segment)} onClick={(event) => { event.stopPropagation(); onSelectAudioSegment?.(segment.id); }} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.stopPropagation(); onAudioEditStart?.(); onAudioSegmentMove?.(segment.id, Math.max(0, segment.projectStart + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1))); }} onBlur={() => onAudioEditEnd?.()}><span className="truncate">{segment.name}</span></button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {visibleTracks.includes('subtitle') && renderTimedTrack('subtitle', 'S1', t('subtitle_track'), subtitleItems, 'border-sky-500/60 bg-sky-500/25 text-sky-100 hover:border-sky-300')}
+      {visibleTracks.includes('image') && renderTimedTrack('image', 'I1', t('image_track'), imageItems, 'border-fuchsia-500/60 bg-fuchsia-500/25 text-fuchsia-100 hover:border-fuchsia-300')}
+      {visibleTracks.includes('effect') && renderTimedTrack('effect', 'FX', t('effect_track'), effectItems, 'border-violet-500/60 bg-violet-500/25 text-violet-100 hover:border-violet-300')}
       <span id="timeline-audio-help" className="sr-only">{t('timeline_audio_help')}</span>
       <span id="timeline-timed-help" className="sr-only">{t('timeline_timed_help')}</span>
     </div>

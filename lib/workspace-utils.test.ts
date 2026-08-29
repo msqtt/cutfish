@@ -3,6 +3,7 @@ import {
   clampWorkspaceSize,
   resizeWorkspacePanel,
   moveTimedRange,
+  resolveVisibleTimelineTracks,
 } from './workspace-utils';
 
 describe('workspace sizing', () => {
@@ -32,5 +33,37 @@ describe('timed timeline items', () => {
 
   it('keeps long items valid when they exceed the project duration', () => {
     expect(moveTimedRange(1, 13, 5, 10)).toEqual({ startTime: 0, endTime: 12 });
+  });
+});
+
+describe('timeline track visibility', () => {
+  it('shows video and its source audio as the two base tracks', () => {
+    expect(resolveVisibleTimelineTracks({
+      hasVideo: true,
+      hasBackgroundAudio: false,
+      hasSubtitles: false,
+      hasImages: false,
+      hasEffects: false,
+    })).toEqual(['video', 'source-audio']);
+  });
+
+  it('adds only tracks that currently contain project elements', () => {
+    expect(resolveVisibleTimelineTracks({
+      hasVideo: true,
+      hasBackgroundAudio: true,
+      hasSubtitles: true,
+      hasImages: false,
+      hasEffects: true,
+    })).toEqual(['video', 'source-audio', 'background-audio', 'subtitle', 'effect']);
+  });
+
+  it('returns no tracks before a video is imported', () => {
+    expect(resolveVisibleTimelineTracks({
+      hasVideo: false,
+      hasBackgroundAudio: true,
+      hasSubtitles: true,
+      hasImages: true,
+      hasEffects: true,
+    })).toEqual([]);
   });
 });
