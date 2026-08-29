@@ -13,6 +13,14 @@ function upstreamUrl(base: string, path: string): string {
   return `${base}/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
+function isMetadataHost(hostname: string): boolean {
+  return hostname === 'huggingface.co' || hostname === 'hf-mirror.com';
+}
+
+function isAllowedRedirectHost(hostname: string): boolean {
+  return isMetadataHost(hostname) || hostname === 'hf.co' || hostname.endsWith('.hf.co');
+}
+
 export async function GET(
   _request: Request,
   context: { params: Promise<{ path: string[] }> },
@@ -26,56 +34,64 @@ export async function GET(
   const isConfig = path.endsWith('.json');
   const failures: string[] = [];
   for (const base of UPSTREAM_BASES) {
-    const url = upstreamUrl(base, path);
+    const initialUrl = upstreamUrl(base, path);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      const response = await fetch(url, {
-        method: 'GET',
-        redirect: isConfig ? 'follow' : 'manual',
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-
-      if (isConfig && response.ok) {
-        const body = await response.arrayBuffer();
-        return new Response(body, {
-          status: 200,
-          headers: {
-            'Content-Type': response.headers.get('Content-Type') || 'application/json',
-            'Content-Length': String(body.byteLength),
-            'Cache-Control': 'public, max-age=86400, immutable',
-          },
+      let currentUrl = initialUrl;
+      for (let hop = 0; hop < 6; hop += 1) {
+        const response = await fetch(currentUrl, {
+          method: 'GET',
+          redirect: isConfig ? 'follow' : 'manual',
+          cache: 'no-store',
+          signal: controller.signal,
         });
-      }
 
-      if (!isConfig && response.status >= 300 && response.status < 400) {
-        const location = response.headers.get('Location');
-        if (location) {
-          return new Response(null, {
-            status: 307,
+        if (isConfig && response.ok) {
+          const body = await response.arrayBuffer();
+          return new Response(body, {
+            status: 200,
             headers: {
-              Location: new URL(location, url).toString(),
-              'Cache-Control': 'no-store',
+              'Content-Type': response.headers.get('Content-Type') || 'application/json',
+              'Content-Length': String(body.byteLength),
+              'Cache-Control': 'public, max-age=86400, immutable',
             },
           });
         }
-      }
 
-      if (!isConfig && response.ok && response.body) {
-        return new Response(response.body, {
-          status: 200,
-          headers: {
-            'Content-Type': response.headers.get('Content-Type') || 'application/octet-stream',
-            ...(response.headers.get('Content-Length') ? { 'Content-Length': response.headers.get('Content-Length')! } : {}),
-            'Cache-Control': 'public, max-age=86400, immutable',
-          },
-        });
-      }
+        if (!isConfig && response.status >= 300 && response.status < 400) {
+          const location = response.headers.get('Location');
+          if (!location) throw new Error(`HTTP ${response.status} without Location`);
+          const nextUrl = new URL(location, currentUrl);
+          if (nextUrl.protocol !== 'https:' || !isAllowedRedirectHost(nextUrl.hostname)) {
+            throw new Error(`Untrusted model redirect host: ${nextUrl.hostname}`);
+          }
+          if (!isMetadataHost(nextUrl.hostname)) {
+            return new Response(null, {
+              status: 307,
+              headers: { Location: nextUrl.toString(), 'Cache-Control': 'no-store' },
+            });
+          }
+          currentUrl = nextUrl.toString();
+          continue;
+        }
 
-      failures.push(`${url}: HTTP ${response.status}`);
+        if (!isConfig && response.ok && response.body) {
+          return new Response(response.body, {
+            status: 200,
+            headers: {
+              'Content-Type': response.headers.get('Content-Type') || 'application/octet-stream',
+              ...(response.headers.get('Content-Length') ? { 'Content-Length': response.headers.get('Content-Length')! } : {}),
+              'Cache-Control': 'public, max-age=86400, immutable',
+            },
+          });
+        }
+
+        throw new Error(`HTTP ${response.status}`);
+      }
+      throw new Error('Too many upstream redirects');
     } catch (error) {
-      failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${initialUrl}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       clearTimeout(timeout);
     }
