@@ -12,7 +12,7 @@ import {
 import { useTheme } from 'next-themes';
 import { useTranslation } from 'react-i18next';
 import ExportPanel from '@/components/ExportPanel';
-import Timeline from '@/components/Timeline';
+import Timeline, { type TimelineTimedItem, type TimelineTimedTrack } from '@/components/Timeline';
 import {
   buildFFmpegCommandExtended, resolveExportProfile,
   selectClipsForExportSpeedAware,
@@ -48,6 +48,7 @@ import {
   rebaseDrawingPoints, getActiveTtsCue, computeOverlayCssTransform,
 } from '@/lib/visual-overlay-utils';
 import { renderOverlaysToPng } from '@/lib/overlay-renderer';
+import { clampWorkspaceSize, moveTimedRange, resizeWorkspacePanel } from '@/lib/workspace-utils';
 import '@/lib/i18n';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -91,6 +92,7 @@ export interface EditorState {
 type InspectorTab = 'clip' | 'project' | 'audio' | 'effects' | 'subtitles';
 const INSPECTOR_TABS: InspectorTab[] = ['clip', 'project', 'audio', 'effects', 'subtitles'];
 type MobilePanel = 'media' | 'inspector' | null;
+type WorkspacePanel = 'media' | 'inspector' | 'timeline';
 type Toast = { kind: 'success' | 'error'; message: string } | null;
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 type OverlayTool = 'select' | 'pen' | 'rect';
@@ -316,6 +318,12 @@ export default function Editor() {
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('clip');
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(256);
+  const [rightPanelWidth, setRightPanelWidth] = useState(288);
+  const [timelineHeight, setTimelineHeight] = useState(300);
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+  const [maximizedPanel, setMaximizedPanel] = useState<WorkspacePanel | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [showProjectManager, setShowProjectManager] = useState(false);
@@ -357,7 +365,7 @@ export default function Editor() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const exportDialogRef = useRef<HTMLDivElement>(null);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
-  const previewContainerRef = useRef<HTMLDivElement>(null);
+  const previewCanvasRef = useRef<HTMLDivElement>(null);
   const helpDialogRef = useRef<HTMLDivElement>(null);
   const projectDialogRef = useRef<HTMLDivElement>(null);
   const objectUrlsRef = useRef(new Set<string>());
@@ -401,6 +409,40 @@ export default function Editor() {
   const previewProjectTime = activeClip
     ? (projectTimeForClipSpeedAware(state.clips, activeClip.id, currentTime) ?? 0)
     : 0;
+
+  const timelineSubtitleItems: TimelineTimedItem[] = state.subtitles.map((cue, index) => ({
+    id: cue.id, name: cue.text.trim() || `${t('subtitles')} ${index + 1}`,
+    startTime: cue.startTime, endTime: cue.endTime,
+  }));
+  const timelineImageItems: TimelineTimedItem[] = state.visualOverlays.filter((overlay) => overlay.type === 'image').map((overlay, index) => ({
+    id: overlay.id, name: `${t('image_track')} ${index + 1}`,
+    startTime: overlay.startTime, endTime: overlay.endTime,
+  }));
+  const filtersActive = state.filters.brightness !== 100 || state.filters.contrast !== 100 || state.filters.saturation !== 100;
+  const timelineEffectItems: TimelineTimedItem[] = [
+    ...state.textOverlays.map((overlay, index) => ({
+      id: `text:${overlay.id}`, name: overlay.text.trim() || `${t('text_overlays')} ${index + 1}`,
+      startTime: overlay.startTime, endTime: overlay.endTime,
+    })),
+    ...state.visualOverlays.filter((overlay) => overlay.type !== 'image').map((overlay, index) => ({
+      id: `overlay:${overlay.id}`, name: `${t('visual_overlays')} ${index + 1}`,
+      startTime: overlay.startTime, endTime: overlay.endTime,
+    })),
+    ...(filtersActive && projectDurationSpeedAware > 0 ? [{
+      id: 'filters:global', name: t('filters'), startTime: 0, endTime: projectDurationSpeedAware, movable: false,
+    }] : []),
+    ...state.transitions.flatMap((transition) => {
+      const clipIndex = state.clips.findIndex((clip) => clip.id === transition.afterClipId);
+      if (clipIndex < 0) return [];
+      const boundary = state.clips.slice(0, clipIndex + 1).reduce((sum, clip) => sum + Math.max(0.01, (clip.trimEnd - clip.trimStart) / (clip.speed || 1)), 0);
+      return [{ id: `transition:${transition.afterClipId}`, name: t(`transition_${transition.type}`), startTime: Math.max(0, boundary - transition.duration), endTime: boundary, movable: false }];
+    }),
+  ];
+  const selectedTimelineItem = editingSubtitleId
+    ? { track: 'subtitle' as const, id: editingSubtitleId }
+    : selectedOverlayId
+      ? { track: (state.visualOverlays.find((overlay) => overlay.id === selectedOverlayId)?.type === 'image' ? 'image' : 'effect') as TimelineTimedTrack, id: state.visualOverlays.find((overlay) => overlay.id === selectedOverlayId)?.type === 'image' ? selectedOverlayId : `overlay:${selectedOverlayId}` }
+      : editingTextId ? { track: 'effect' as const, id: `text:${editingTextId}` } : null;
 
   const createTrackedUrl = useCallback((file: Blob) => {
     const url = URL.createObjectURL(file);
@@ -563,6 +605,84 @@ export default function Editor() {
       });
     }
   }, [checkpoint, currentProjectId, draftReady, persistProject, state]);
+
+
+  const startWorkspaceResize = useCallback((event: React.PointerEvent<HTMLElement>, panel: WorkspacePanel) => {
+    if (maximizedPanel) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startSize = panel === 'media' ? leftPanelWidth : panel === 'inspector' ? rightPanelWidth : timelineHeight;
+    const onMove = (moveEvent: PointerEvent) => {
+      if (panel === 'media') {
+        setLeftPanelWidth(resizeWorkspacePanel(startSize, moveEvent.clientX - startX, 1, 180, Math.min(640, window.innerWidth - 420)));
+      } else if (panel === 'inspector') {
+        setRightPanelWidth(resizeWorkspacePanel(startSize, moveEvent.clientX - startX, -1, 220, Math.min(720, window.innerWidth - 420)));
+      } else {
+        setTimelineHeight(resizeWorkspacePanel(startSize, moveEvent.clientY - startY, -1, 180, Math.max(220, window.innerHeight - 160)));
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }, [leftPanelWidth, maximizedPanel, rightPanelWidth, timelineHeight]);
+
+  const resizeWorkspaceFromKeyboard = useCallback((panel: WorkspacePanel, delta: number) => {
+    if (panel === 'media') setLeftPanelWidth((size) => clampWorkspaceSize(size + delta, 180, Math.min(640, window.innerWidth - 420)));
+    else if (panel === 'inspector') setRightPanelWidth((size) => clampWorkspaceSize(size + delta, 220, Math.min(720, window.innerWidth - 420)));
+    else setTimelineHeight((size) => clampWorkspaceSize(size + delta, 180, Math.max(220, window.innerHeight - 160)));
+  }, []);
+
+  const selectTimelineTimedItem = useCallback((track: TimelineTimedTrack, id: string | null) => {
+    if (track === 'subtitle') {
+      setEditingSubtitleId(id);
+      if (id) { setSelectedOverlayId(null); setEditingTextId(null); setInspectorTab('subtitles'); }
+      return;
+    }
+    if (track === 'image') {
+      setSelectedOverlayId(id);
+      if (id) { setEditingSubtitleId(null); setEditingTextId(null); setInspectorTab('subtitles'); }
+      return;
+    }
+    if (!id) { setEditingTextId(null); return; }
+    if (id.startsWith('text:')) {
+      setEditingTextId(id.slice(5));
+      setSelectedOverlayId(null);
+      setEditingSubtitleId(null);
+      setInspectorTab('effects');
+    } else if (id.startsWith('overlay:')) {
+      setSelectedOverlayId(id.slice(8));
+      setEditingTextId(null);
+      setEditingSubtitleId(null);
+      setInspectorTab('subtitles');
+    } else {
+      setInspectorTab('effects');
+    }
+  }, []);
+
+  const moveTimelineTimedItem = useCallback((track: TimelineTimedTrack, id: string, targetStart: number) => {
+    replaceState((current) => {
+      const duration = getProjectDurationSpeedAware(current.clips);
+      if (track === 'subtitle') return {
+        ...current,
+        subtitles: current.subtitles.map((cue) => cue.id === id ? { ...cue, ...moveTimedRange(cue.startTime, cue.endTime, targetStart, duration) } : cue),
+      };
+      const rawId = id.startsWith('text:') ? id.slice(5) : id.startsWith('overlay:') ? id.slice(8) : id;
+      if (track === 'effect' && id.startsWith('text:')) return {
+        ...current,
+        textOverlays: current.textOverlays.map((overlay) => overlay.id === rawId ? { ...overlay, ...moveTimedRange(overlay.startTime, overlay.endTime, targetStart, duration) } : overlay),
+      };
+      return {
+        ...current,
+        visualOverlays: current.visualOverlays.map((overlay) => overlay.id === rawId ? { ...overlay, ...moveTimedRange(overlay.startTime, overlay.endTime, targetStart, duration) } as VisualOverlay : overlay),
+      };
+    });
+  }, [replaceState]);
 
   // ─── Import ──────────────────────────────────────────────────────────────
 
@@ -947,17 +1067,23 @@ export default function Editor() {
 
   // ─── Fullscreen ──────────────────────────────────────────────────────────
 
-  const toggleFullscreen = useCallback(() => {
-    if (!previewContainerRef.current) return;
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
-    } else {
-      void previewContainerRef.current.requestFullscreen().catch(() => undefined);
+  const toggleFullscreen = useCallback(async () => {
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+    try {
+      if (document.fullscreenElement === canvas) {
+        await document.exitFullscreen();
+        return;
+      }
+      if (document.fullscreenElement) await document.exitFullscreen();
+      await canvas.requestFullscreen();
+    } catch {
+      // Fullscreen may be rejected when it is not initiated by a user gesture.
     }
   }, []);
 
   useEffect(() => {
-    const handler = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    const handler = () => setIsFullscreen(document.fullscreenElement === previewCanvasRef.current);
     document.addEventListener('fullscreenchange', handler);
     return () => document.removeEventListener('fullscreenchange', handler);
   }, []);
@@ -1821,17 +1947,24 @@ export default function Editor() {
         {mobilePanel && <button className="absolute inset-0 z-20 bg-black/50 transition active:bg-black/60 lg:hidden" onClick={() => setMobilePanel(null)} aria-label={t('close')} />}
 
         {/* ─── Media Panel (Left) ──────────────────────────────────────── */}
-        <aside className={`absolute inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)] transition-transform lg:static lg:w-64 lg:translate-x-0 ${mobilePanel === 'media' ? 'translate-x-0' : '-translate-x-full'}`} aria-label={t('media_assets')}>
-          <div className="flex h-11 items-center justify-between border-b border-[var(--border)] px-3">
-            <span className="text-xs font-bold uppercase tracking-widest text-[var(--muted)]">{t('media_assets')}</span>
+        <aside
+          data-maximized={maximizedPanel === 'media'}
+          className={`workspace-side-panel absolute inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)] transition-[transform,width] lg:static lg:w-[var(--media-panel-width)] lg:translate-x-0 ${maximizedPanel === 'media' ? 'lg:fixed lg:inset-0 lg:z-50' : ''} ${mobilePanel === 'media' ? 'translate-x-0' : '-translate-x-full'}`}
+          style={{ '--media-panel-width': maximizedPanel === 'media' ? '100vw' : `${leftPanelCollapsed ? 48 : leftPanelWidth}px` } as React.CSSProperties}
+          aria-label={t('media_assets')}
+        >
+          <div className={`flex h-11 items-center justify-between border-b border-[var(--border)] ${leftPanelCollapsed ? 'lg:px-1' : 'px-3'}`}>
+            <span className={`text-xs font-bold uppercase tracking-widest text-[var(--muted)] ${leftPanelCollapsed ? 'lg:hidden' : ''}`}>{t('media_assets')}</span>
             <div className="flex items-center gap-1">
+              {maximizedPanel !== 'media' && <button type="button" onClick={() => setLeftPanelCollapsed((value) => !value)} className={`${iconButton} hidden lg:inline-flex`} aria-label={leftPanelCollapsed ? t('expand_panel') : t('collapse_panel')} title={leftPanelCollapsed ? t('expand_panel') : t('collapse_panel')}>{leftPanelCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}</button>}
+              {!leftPanelCollapsed && <button type="button" onClick={() => setMaximizedPanel(maximizedPanel === 'media' ? null : 'media')} className={`${iconButton} hidden lg:inline-flex`} aria-pressed={maximizedPanel === 'media'} aria-label={maximizedPanel === 'media' ? t('restore_panel') : t('maximize_panel')} title={maximizedPanel === 'media' ? t('restore_panel') : t('maximize_panel')}>{maximizedPanel === 'media' ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}</button>}
               <button onClick={() => { void refreshProjects(); setShowProjectManager(true); setMobilePanel(null); }} className={`${iconButton} sm:hidden`} aria-label={t('projects')} title={t('projects')}><Menu className="h-4 w-4" /></button>
               <button onClick={() => { setShowHelpModal(true); setMobilePanel(null); }} className={`${iconButton} sm:hidden`} aria-label={t('keyboard_shortcuts')} title={t('shortcut_help')}><HelpCircle className="h-4 w-4" /></button>
-              <button onClick={() => fileInputRef.current?.click()} disabled={Boolean(importProgress)} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />{t('import')}</button>
+              <button onClick={() => fileInputRef.current?.click()} disabled={Boolean(importProgress)} className={`flex items-center gap-1 rounded ${leftPanelCollapsed ? 'lg:hidden' : ''} px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10 disabled:opacity-40`}><Plus className="h-3.5 w-3.5" />{t('import')}</button>
               <button onClick={() => setMobilePanel(null)} className={`${iconButton} lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
             </div>
           </div>
-          <div role="list" className="flex-1 space-y-2 overflow-y-auto p-2">
+          <div role="list" className={`flex-1 space-y-2 overflow-y-auto p-2 ${leftPanelCollapsed ? 'lg:hidden' : ''}`}>
             {state.clips.map((clip, index) => (
               <div key={clip.id} role="listitem" className={`group relative rounded-lg border p-1.5 transition ${state.activeClipId === clip.id ? 'border-indigo-500 bg-indigo-500/10' : 'border-[var(--border)] bg-[var(--raised)] hover:border-indigo-400'}`}>
                 <button onClick={() => { replaceState((current) => ({ ...current, activeClipId: clip.id })); setMobilePanel(null); }} className="block w-full rounded text-left" aria-current={state.activeClipId === clip.id ? 'true' : undefined}>
@@ -1869,10 +2002,11 @@ export default function Editor() {
             ))}
             {!state.clips.length && <p className="m-2 rounded-lg border border-dashed border-[var(--border)] p-5 text-center text-xs leading-5 text-[var(--muted)]">{t('no_assets')}</p>}
           </div>
+          {!leftPanelCollapsed && maximizedPanel !== 'media' && <div role="separator" aria-label={t('resize_media_panel')} aria-orientation="vertical" aria-valuemin={180} aria-valuemax={640} aria-valuenow={Math.round(leftPanelWidth)} tabIndex={0} className="absolute inset-y-0 right-0 z-40 hidden w-2 translate-x-1/2 cursor-col-resize touch-none lg:block" onPointerDown={(event) => startWorkspaceResize(event, 'media')} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); resizeWorkspaceFromKeyboard('media', (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 48 : 16)); }} />}
         </aside>
 
         {/* ─── Preview (Center) ────────────────────────────────────────── */}
-        <section ref={previewContainerRef} className="relative flex min-w-0 flex-1 flex-col bg-[var(--canvas)]" aria-label={t('preview')}>
+        <section className="relative flex min-w-0 flex-1 flex-col bg-[var(--canvas)]" aria-label={t('preview')}>
           {importProgress && (
             <div className="absolute left-1/2 top-3 z-30 w-[min(90%,24rem)] -translate-x-1/2 rounded-lg border border-indigo-400/30 bg-[var(--panel)] p-3 shadow-xl" role="status" aria-live="polite">
               <div className="flex items-center justify-between gap-3 text-xs"><span className="truncate">{t('importing_file', { name: importProgress.name })}</span><span className="font-mono">{importProgress.current}/{importProgress.total}</span></div>
@@ -1896,7 +2030,8 @@ export default function Editor() {
               </button>
             ) : (
               <div
-                className={`relative flex w-full max-w-3xl items-center justify-center overflow-hidden rounded-xl border border-[var(--border)] bg-black shadow-2xl ${overlayTool !== 'select' ? 'cursor-crosshair' : ''}`}
+                ref={previewCanvasRef}
+                className={`preview-canvas relative flex w-full max-w-3xl items-center justify-center overflow-hidden rounded-xl border border-[var(--border)] bg-black shadow-2xl ${overlayTool !== 'select' ? 'cursor-crosshair' : ''}`}
                 style={{ aspectRatio: previewAspectRatio, touchAction: overlayTool !== 'select' ? 'none' : undefined }}
                 onPointerDown={overlayTool !== 'select' ? handlePreviewPointerDown : undefined}
                 onPointerMove={overlayTool !== 'select' ? handlePreviewPointerMove : undefined}
@@ -2094,11 +2229,16 @@ export default function Editor() {
         </section>
 
         {/* ─── Inspector (Right) ───────────────────────────────────────── */}
-        <aside className={`fixed inset-x-0 bottom-0 z-30 flex max-h-[70dvh] flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--panel)] transition-transform lg:static lg:inset-auto lg:max-h-none lg:w-72 lg:rounded-none lg:border-l lg:border-t-0 ${mobilePanel === 'inspector' ? 'translate-y-0' : 'translate-y-full lg:translate-y-0'}`} aria-label={t('inspector')} role={mobilePanel === 'inspector' ? 'dialog' : undefined} aria-modal={mobilePanel === 'inspector' ? true : undefined}>
+        <aside
+          data-maximized={maximizedPanel === 'inspector'}
+          className={`workspace-side-panel fixed inset-x-0 bottom-0 z-30 flex max-h-[70dvh] flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--panel)] transition-[transform,width] lg:static lg:inset-auto lg:max-h-none lg:w-[var(--inspector-panel-width)] lg:rounded-none lg:border-l lg:border-t-0 ${maximizedPanel === 'inspector' ? 'lg:fixed lg:inset-0 lg:z-50 lg:max-h-none' : ''} ${mobilePanel === 'inspector' ? 'translate-y-0' : 'translate-y-full lg:translate-y-0'}`}
+          style={{ '--inspector-panel-width': maximizedPanel === 'inspector' ? '100vw' : `${rightPanelCollapsed ? 48 : rightPanelWidth}px` } as React.CSSProperties}
+          aria-label={t('inspector')} role={mobilePanel === 'inspector' ? 'dialog' : undefined} aria-modal={mobilePanel === 'inspector' ? true : undefined}
+        >
           <div className="flex h-3 shrink-0 items-center justify-center lg:hidden" aria-hidden="true"><span className="h-1 w-10 rounded-full bg-[var(--border)]" /></div>
           {/* Tab Bar */}
           <div className="flex min-h-12 shrink-0 items-center border-b border-[var(--border)] px-1">
-            <div role="tablist" aria-label={t('inspector')} className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto">
+            <div role="tablist" aria-label={t('inspector')} className={`flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto ${rightPanelCollapsed ? 'lg:hidden' : ''}`}>
               {INSPECTOR_TABS.map((tab) => (
                 <button
                   key={tab}
@@ -2123,10 +2263,12 @@ export default function Editor() {
                 >{t(`tab_${tab}`)}</button>
               ))}
             </div>
+            {maximizedPanel !== 'inspector' && <button type="button" onClick={() => setRightPanelCollapsed((value) => !value)} className={`${iconButton} hidden lg:inline-flex`} aria-label={rightPanelCollapsed ? t('expand_panel') : t('collapse_panel')} title={rightPanelCollapsed ? t('expand_panel') : t('collapse_panel')}>{rightPanelCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</button>}
+            {!rightPanelCollapsed && <button type="button" onClick={() => setMaximizedPanel(maximizedPanel === 'inspector' ? null : 'inspector')} className={`${iconButton} hidden lg:inline-flex`} aria-pressed={maximizedPanel === 'inspector'} aria-label={maximizedPanel === 'inspector' ? t('restore_panel') : t('maximize_panel')} title={maximizedPanel === 'inspector' ? t('restore_panel') : t('maximize_panel')}>{maximizedPanel === 'inspector' ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}</button>}
             <button onClick={() => setMobilePanel(null)} className={`${iconButton} ml-1 lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
           </div>
 
-          <div id="inspector-panel" role="tabpanel" aria-labelledby={`inspector-tab-${inspectorTab}`} className="flex-1 space-y-6 overflow-y-auto p-4">
+          <div id="inspector-panel" role="tabpanel" aria-labelledby={`inspector-tab-${inspectorTab}`} className={`flex-1 space-y-6 overflow-y-auto p-4 ${rightPanelCollapsed ? 'lg:hidden' : ''}`}>
             {/* ── Clip Tab ─────────────────────────────────────────────── */}
             {inspectorTab === 'clip' && (
               <>
@@ -2640,7 +2782,7 @@ export default function Editor() {
           </div>
 
           {/* ─── Sticky Export Button ──────────────────────────────────── */}
-          <div className="shrink-0 border-t border-[var(--border)] bg-[var(--panel)] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <div className={`shrink-0 border-t border-[var(--border)] bg-[var(--panel)] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] ${rightPanelCollapsed ? 'lg:hidden' : ''}`}>
             <p className="mb-1.5 text-xs text-[var(--muted)]">
               {state.exportSettings.resolution} · {state.exportSettings.frameRate} fps · {t(`quality_${state.exportSettings.quality}`)}
             </p>
@@ -2652,15 +2794,21 @@ export default function Editor() {
               {t('open_export_settings')}
             </button>
           </div>
+          {!rightPanelCollapsed && maximizedPanel !== 'inspector' && <div role="separator" aria-label={t('resize_inspector_panel')} aria-orientation="vertical" aria-valuemin={220} aria-valuemax={720} aria-valuenow={Math.round(rightPanelWidth)} tabIndex={0} className="absolute inset-y-0 left-0 z-40 hidden w-2 -translate-x-1/2 cursor-col-resize touch-none lg:block" onPointerDown={(event) => startWorkspaceResize(event, 'inspector')} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); resizeWorkspaceFromKeyboard('inspector', (event.key === 'ArrowLeft' ? 1 : -1) * (event.shiftKey ? 48 : 16)); }} />}
         </aside>
       </div>
 
       {/* ─── Timeline ────────────────────────────────────────────────────── */}
-      <footer className={`flex shrink-0 flex-col border-t border-[var(--border)] bg-[var(--panel)] transition-all ${timelineCollapsed ? 'h-10' : (state.backgroundMusic ? 'h-52 sm:h-60 lg:h-64' : 'h-40 sm:h-48 lg:h-52')}`}>
+      <footer
+        className={`flex flex-col border-t border-[var(--border)] bg-[var(--panel)] transition-[height] ${maximizedPanel === 'timeline' ? 'fixed inset-0 z-50' : 'relative shrink-0'}`}
+        style={{ height: timelineCollapsed ? '2.5rem' : maximizedPanel === 'timeline' ? '100dvh' : `${timelineHeight}px` }}
+      >
+        {!timelineCollapsed && maximizedPanel !== 'timeline' && <div role="separator" aria-label={t('resize_timeline_panel')} aria-orientation="horizontal" aria-valuemin={180} aria-valuemax={Math.max(220, typeof window === 'undefined' ? 800 : window.innerHeight - 160)} aria-valuenow={Math.round(timelineHeight)} tabIndex={0} className="absolute inset-x-0 top-0 z-40 h-2 -translate-y-1/2 cursor-row-resize touch-none" onPointerDown={(event) => startWorkspaceResize(event, 'timeline')} onKeyDown={(event) => { if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return; event.preventDefault(); resizeWorkspaceFromKeyboard('timeline', (event.key === 'ArrowUp' ? 1 : -1) * (event.shiftKey ? 48 : 16)); }} />}
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border)] px-3 text-xs text-[var(--muted)] sm:px-4">
-          <button onClick={() => setTimelineCollapsed(!timelineCollapsed)} className={iconButton} aria-label={timelineCollapsed ? t('expand_timeline') : t('collapse_timeline')}>
+          <button onClick={() => { setTimelineCollapsed(!timelineCollapsed); if (!timelineCollapsed) setMaximizedPanel(null); }} className={iconButton} aria-label={timelineCollapsed ? t('expand_timeline') : t('collapse_timeline')}>
             {timelineCollapsed ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           </button>
+          {!timelineCollapsed && <button type="button" onClick={() => setMaximizedPanel(maximizedPanel === 'timeline' ? null : 'timeline')} className={iconButton} aria-pressed={maximizedPanel === 'timeline'} aria-label={maximizedPanel === 'timeline' ? t('restore_panel') : t('maximize_panel')} title={maximizedPanel === 'timeline' ? t('restore_panel') : t('maximize_panel')}>{maximizedPanel === 'timeline' ? <Minimize className="h-3.5 w-3.5" /> : <Maximize className="h-3.5 w-3.5" />}</button>}
           <span><strong className="text-[var(--text)]">V1</strong> {t('video_track')}</span>
           <span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('audio_track')}</span>
           <span className="ml-auto hidden font-mono sm:inline">{t('project_duration', { value: projectDurationSpeedAware.toFixed(1) })}{state.transitions.length > 0 && outputDuration < projectDurationSpeedAware - 0.01 ? ` · ${t('output_duration', { value: outputDuration.toFixed(1) })}` : ''}</span>
@@ -2694,6 +2842,14 @@ export default function Editor() {
               onAudioSegmentMove={moveAudioSegment}
               onAudioEditStart={beginContinuousEdit}
               onAudioEditEnd={finishContinuousEdit}
+              subtitleItems={timelineSubtitleItems}
+              imageItems={timelineImageItems}
+              effectItems={timelineEffectItems}
+              selectedTimedItem={selectedTimelineItem}
+              onSelectTimedItem={selectTimelineTimedItem}
+              onTimedItemMove={moveTimelineTimedItem}
+              onTimedEditStart={beginContinuousEdit}
+              onTimedEditEnd={finishContinuousEdit}
             />
           ) : <div className="flex flex-1 items-center justify-center text-xs text-[var(--muted)]">{t('no_media')}</div>
         )}
