@@ -37,12 +37,13 @@ export function moveTimedRange(
   return { startTime: nextStart, endTime: nextStart + duration };
 }
 
-export type VisibleTimelineTrack = 'video' | 'source-audio' | 'background-audio' | 'subtitle' | 'image' | 'effect';
+export type VisibleTimelineTrack = 'video' | 'source-audio' | 'background-audio' | 'tts-audio' | 'subtitle' | 'image' | 'effect';
 
 export interface TimelineTrackAvailability {
   hasVideo: boolean;
   hasBackgroundAudio: boolean;
   hasSubtitles: boolean;
+  hasTts?: boolean;
   hasImages: boolean;
   hasEffects: boolean;
 }
@@ -52,6 +53,7 @@ export function resolveVisibleTimelineTracks(availability: TimelineTrackAvailabi
   if (!availability.hasVideo) return [];
   const tracks: VisibleTimelineTrack[] = ['video', 'source-audio'];
   if (availability.hasBackgroundAudio) tracks.push('background-audio');
+  if (availability.hasTts) tracks.push('tts-audio');
   if (availability.hasSubtitles) tracks.push('subtitle');
   if (availability.hasImages) tracks.push('image');
   if (availability.hasEffects) tracks.push('effect');

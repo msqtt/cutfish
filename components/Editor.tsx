@@ -25,10 +25,14 @@ import { LOCAL_TTS_VOICES, getTtsCacheKey, selectTtsCuesForExport, getVoiceById,
 import type { LocalTtsVoiceId } from '@/lib/tts-utils';
 import {
   duplicateClip, getProjectDurationSpeedAware, projectTimeForClipSpeedAware,
-  moveClipToIndex, splitClipAt,
+  moveClipToIndex,
   buildRotationTransformCSS, type CanvasAspect, type CanvasFit,
 } from '@/lib/editor-utils';
 import { useHistory } from '@/lib/history';
+import {
+  backgroundAudioGainAtTime, inspectorTabForSelection, splitClipWithTransition,
+  type EditorSelection,
+} from '@/lib/editor-workflow';
 import {
   createDraft, listDrafts, loadDraft, saveDraft, deleteDraft, renameDraft,
   migrateFromV1, applyStateDefaults,
@@ -299,7 +303,7 @@ export default function Editor() {
   const { t, i18n } = useTranslation();
   const { resolvedTheme, setTheme } = useTheme();
   const {
-    state, set: updateState, replace: replaceState, checkpoint, undo, redo,
+    state, set: updateState, replace: replaceState, checkpoint, undo: undoHistoryAction, redo: redoHistoryAction,
     canUndo, canRedo, reset,
   } = useHistory<EditorState>(DEFAULT_STATE);
 
@@ -315,7 +319,8 @@ export default function Editor() {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('clip');
+  const [selection, setSelection] = useState<EditorSelection>(null);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('project');
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [leftPanelWidth, setLeftPanelWidth] = useState(256);
@@ -337,11 +342,10 @@ export default function Editor() {
 
   // Subtitle/overlay state
   const [editingSubtitleId, setEditingSubtitleId] = useState<string | null>(null);
+  const [selectedSubtitleTrack, setSelectedSubtitleTrack] = useState<'tts' | 'subtitle'>('subtitle');
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
   const [overlayTool, setOverlayTool] = useState<OverlayTool>('select');
-  const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [ttsPlaying, setTtsPlaying] = useState(false);
-  const ttsSupported = typeof window !== 'undefined' && typeof window.speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined';
 
   // Local TTS generation state
   const [localTtsProgress, setLocalTtsProgress] = useState(0);
@@ -350,6 +354,8 @@ export default function Editor() {
   const localTtsCacheRef = useRef(new Map<string, Blob>());
   const localTtsAudioRef = useRef<HTMLAudioElement | null>(null);
   const localTtsUrlRef = useRef<string | null>(null);
+  const ttsAudioContextRef = useRef<AudioContext | null>(null);
+  const ttsBufferSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   // Project manager state
   const [projects, setProjects] = useState<DraftProject[]>([]);
@@ -359,9 +365,8 @@ export default function Editor() {
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
+  const backgroundAudioPoolRef = useRef(new Map<string, HTMLAudioElement>());
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const audioInputRef = useRef<HTMLInputElement>(null);
-  const audioReplaceInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const exportDialogRef = useRef<HTMLDivElement>(null);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
@@ -382,9 +387,9 @@ export default function Editor() {
   const rectDrawRef = useRef<{ startX: number; startY: number; active: boolean }>({ startX: 0, startY: 0, active: false });
   const [draftPenPoints, setDraftPenPoints] = useState<Array<{ x: number; y: number }>>([]);
   const [draftRect, setDraftRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  const ttsUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const ttsModeRef = useRef<'auto' | 'manual' | null>(null);
   const lastTtsCueIdRef = useRef<string | null>(null);
+  const ttsRequestIdRef = useRef(0);
 
   const activeClip = state.clips.find((clip) => clip.id === state.activeClipId);
   // Effective (validated) audio selection: falls back to null when the selected
@@ -410,10 +415,23 @@ export default function Editor() {
     ? (projectTimeForClipSpeedAware(state.clips, activeClip.id, currentTime) ?? 0)
     : 0;
 
+  const selectedBackgroundAudioSegment = selection?.kind === 'background-audio'
+    ? state.backgroundMusic?.segments.find((segment) => segment.id === selection.id) ?? null
+    : null;
+  const canContextSplit = selectedBackgroundAudioSegment
+    ? previewProjectTime - selectedBackgroundAudioSegment.projectStart > 0.01
+      && selectedBackgroundAudioSegment.projectStart + selectedBackgroundAudioSegment.trimEnd - selectedBackgroundAudioSegment.trimStart - previewProjectTime > 0.01
+    : (!selection || selection.kind === 'video' || selection.kind === 'source-audio') && canSplit;
   const timelineSubtitleItems: TimelineTimedItem[] = state.subtitles.map((cue, index) => ({
     id: cue.id, name: cue.text.trim() || `${t('subtitles')} ${index + 1}`,
     startTime: cue.startTime, endTime: cue.endTime,
   }));
+  const timelineTtsItems: TimelineTimedItem[] = state.subtitles
+    .filter((cue) => cue.tts?.enabled && cue.text.trim())
+    .map((cue, index) => ({
+      id: cue.id, name: cue.text.trim() || `${t('tts_audio_track')} ${index + 1}`,
+      startTime: cue.startTime, endTime: cue.endTime,
+    }));
   const timelineImageItems: TimelineTimedItem[] = state.visualOverlays.filter((overlay) => overlay.type === 'image').map((overlay, index) => ({
     id: overlay.id, name: `${t('image_track')} ${index + 1}`,
     startTime: overlay.startTime, endTime: overlay.endTime,
@@ -438,11 +456,13 @@ export default function Editor() {
       return [{ id: `transition:${transition.afterClipId}`, name: t(`transition_${transition.type}`), startTime: Math.max(0, boundary - transition.duration), endTime: boundary, movable: false }];
     }),
   ];
-  const selectedTimelineItem = editingSubtitleId
-    ? { track: 'subtitle' as const, id: editingSubtitleId }
-    : selectedOverlayId
-      ? { track: (state.visualOverlays.find((overlay) => overlay.id === selectedOverlayId)?.type === 'image' ? 'image' : 'effect') as TimelineTimedTrack, id: state.visualOverlays.find((overlay) => overlay.id === selectedOverlayId)?.type === 'image' ? selectedOverlayId : `overlay:${selectedOverlayId}` }
-      : editingTextId ? { track: 'effect' as const, id: `text:${editingTextId}` } : null;
+  const selectedTimelineItem = selection?.kind === 'subtitle'
+    ? { track: selectedSubtitleTrack as TimelineTimedTrack, id: selection.id }
+    : selection?.kind === 'image'
+      ? { track: 'image' as const, id: selection.id }
+      : selection?.kind === 'effect'
+        ? { track: 'effect' as const, id: selection.id }
+        : null;
 
   const createTrackedUrl = useCallback((file: Blob) => {
     const url = URL.createObjectURL(file);
@@ -455,7 +475,14 @@ export default function Editor() {
   useEffect(() => () => {
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     ffmpegRef.current?.terminate();
-    // Clean up local TTS Audio instance and URL
+    backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
+    backgroundAudioPoolRef.current.clear();
+    // Clean up local TTS audio and invalidate pending async synthesis.
+    ttsRequestIdRef.current += 1;
+    ttsBufferSourceRef.current?.stop();
+    ttsBufferSourceRef.current = null;
+    void ttsAudioContextRef.current?.close();
+    ttsAudioContextRef.current = null;
     if (localTtsAudioRef.current) { localTtsAudioRef.current.pause(); localTtsAudioRef.current = null; }
     if (localTtsUrlRef.current) { URL.revokeObjectURL(localTtsUrlRef.current); localTtsUrlRef.current = null; }
   }, []);
@@ -464,60 +491,26 @@ export default function Editor() {
     document.documentElement.lang = i18n.resolvedLanguage?.startsWith('zh') ? 'zh-CN' : 'en';
   }, [i18n.resolvedLanguage]);
 
-  // TTS: Load available voices, detect support
   useEffect(() => {
-    if (!ttsSupported) return;
-    const loadVoices = () => { setTtsVoices(window.speechSynthesis?.getVoices() ?? []); };
-    loadVoices();
-    window.speechSynthesis?.addEventListener('voiceschanged', loadVoices);
-    return () => { window.speechSynthesis?.removeEventListener('voiceschanged', loadVoices); };
-  }, [ttsSupported]);
+    backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
+    backgroundAudioPoolRef.current.clear();
+  }, [state.backgroundMusic?.url]);
 
-  // TTS: Auto-play when playback enters a cue with TTS enabled.
-  useEffect(() => {
-    if (!ttsSupported) return;
-    const activeCue = isPlaying ? getActiveTtsCue(state.subtitles, previewProjectTime) : null;
-    if (!activeCue?.tts || !activeCue.text.trim()) {
-      if (ttsModeRef.current === 'auto') {
-        window.speechSynthesis.cancel();
-        ttsModeRef.current = null;
-        setTtsPlaying(false);
-      }
-      lastTtsCueIdRef.current = null;
-      return;
-    }
-    if (activeCue.id === lastTtsCueIdRef.current) return;
-
-    lastTtsCueIdRef.current = activeCue.id;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(activeCue.text);
-    const voice = ttsVoices.find((candidate) => candidate.voiceURI === activeCue.tts!.voiceURI);
-    if (voice) utterance.voice = voice;
-    utterance.lang = activeCue.tts.lang || voice?.lang || '';
-    utterance.rate = activeCue.tts.rate;
-    utterance.pitch = activeCue.tts.pitch;
-    utterance.volume = activeCue.tts.volume;
-    utterance.onend = () => { ttsModeRef.current = null; setTtsPlaying(false); };
-    utterance.onerror = () => { ttsModeRef.current = null; setTtsPlaying(false); };
-    ttsUtteranceRef.current = utterance;
-    ttsModeRef.current = 'auto';
-    window.speechSynthesis.speak(utterance);
-    setTtsPlaying(true);
-  }, [isPlaying, previewProjectTime, state.subtitles, ttsSupported, ttsVoices]);
+  // Timeline auto-preview is wired below the local Piper WAV preview helpers so
+  // manual preview, timeline playback, and export use the same voice pipeline.
 
   // A project switch always terminates speech from the previous project.
   useEffect(() => {
-    if (!ttsSupported) return;
-    window.speechSynthesis.cancel();
+    ttsRequestIdRef.current += 1;
+    ttsBufferSourceRef.current?.stop();
+    ttsBufferSourceRef.current = null;
+    localTtsAudioRef.current?.pause();
+    localTtsAudioRef.current = null;
     ttsModeRef.current = null;
     lastTtsCueIdRef.current = null;
     const timer = window.setTimeout(() => setTtsPlaying(false), 0);
     return () => window.clearTimeout(timer);
-  }, [currentProjectId, ttsSupported]);
-
-  useEffect(() => () => {
-    if (ttsSupported) window.speechSynthesis.cancel();
-  }, [ttsSupported]);
+  }, [currentProjectId]);
 
   // Initialize: migrate from v1, load projects
   useEffect(() => {
@@ -591,20 +584,9 @@ export default function Editor() {
     if (!continuousEditRef.current) return;
     checkpoint(continuousEditRef.current);
     continuousEditRef.current = null;
-    // H2/H3: Flush an immediate save when a continuous edit finishes
-    if (currentProjectId && draftReady) {
-      savingRef.current = true;
-      setSaveStatus('saving');
-      void persistProject(currentProjectId, editorStateToDraft(state)).then(() => {
-        setSaveStatus('saved');
-        setLastSavedTime(Date.now());
-      }).catch(() => {
-        setSaveStatus('error');
-      }).finally(() => {
-        savingRef.current = false;
-      });
-    }
-  }, [checkpoint, currentProjectId, draftReady, persistProject, state]);
+    // The committed render triggers the normal autosave with the latest state.
+    // Saving here would serialize the stale pointer-down closure.
+  }, [checkpoint]);
 
 
   const startWorkspaceResize = useCallback((event: React.PointerEvent<HTMLElement>, panel: WorkspacePanel) => {
@@ -638,37 +620,57 @@ export default function Editor() {
     else setTimelineHeight((size) => clampWorkspaceSize(size + delta, 180, Math.max(220, window.innerHeight - 160)));
   }, []);
 
+  const selectEditorItem = useCallback((next: EditorSelection, subtitleTrack: 'tts' | 'subtitle' = 'subtitle') => {
+    setSelection(next);
+    setInspectorTab(inspectorTabForSelection(next));
+    if (next) {
+      setRightPanelCollapsed(false);
+      if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches) setMobilePanel('inspector');
+    }
+    setSelectedAudioSegmentId(next?.kind === 'background-audio' ? next.id : null);
+    setEditingSubtitleId(next?.kind === 'subtitle' ? next.id : null);
+    if (next?.kind === 'subtitle') setSelectedSubtitleTrack(subtitleTrack);
+    setSelectedOverlayId(next?.kind === 'image'
+      ? next.id
+      : next?.kind === 'effect' && next.id.startsWith('overlay:') ? next.id.slice(8) : null);
+    setEditingTextId(next?.kind === 'effect' && next.id.startsWith('text:') ? next.id.slice(5) : null);
+  }, []);
+
+
+  const undo = useCallback(() => {
+    undoHistoryAction();
+    selectEditorItem(null);
+  }, [selectEditorItem, undoHistoryAction]);
+
+  const redo = useCallback(() => {
+    redoHistoryAction();
+    selectEditorItem(null);
+  }, [redoHistoryAction, selectEditorItem]);
+  const selectVideoClip = useCallback((clipId: string, kind: 'video' | 'source-audio' = 'video') => {
+    replaceState((current) => current.activeClipId === clipId ? current : { ...current, activeClipId: clipId });
+    selectEditorItem({ kind, id: clipId });
+  }, [replaceState, selectEditorItem]);
+
   const selectTimelineTimedItem = useCallback((track: TimelineTimedTrack, id: string | null) => {
-    if (track === 'subtitle') {
-      setEditingSubtitleId(id);
-      if (id) { setSelectedOverlayId(null); setEditingTextId(null); setInspectorTab('subtitles'); }
+    if (!id) {
+      selectEditorItem(null);
+      return;
+    }
+    if (track === 'subtitle' || track === 'tts') {
+      selectEditorItem({ kind: 'subtitle', id }, track);
       return;
     }
     if (track === 'image') {
-      setSelectedOverlayId(id);
-      if (id) { setEditingSubtitleId(null); setEditingTextId(null); setInspectorTab('subtitles'); }
+      selectEditorItem({ kind: 'image', id });
       return;
     }
-    if (!id) { setEditingTextId(null); return; }
-    if (id.startsWith('text:')) {
-      setEditingTextId(id.slice(5));
-      setSelectedOverlayId(null);
-      setEditingSubtitleId(null);
-      setInspectorTab('effects');
-    } else if (id.startsWith('overlay:')) {
-      setSelectedOverlayId(id.slice(8));
-      setEditingTextId(null);
-      setEditingSubtitleId(null);
-      setInspectorTab('subtitles');
-    } else {
-      setInspectorTab('effects');
-    }
-  }, []);
+    selectEditorItem({ kind: 'effect', id });
+  }, [selectEditorItem]);
 
   const moveTimelineTimedItem = useCallback((track: TimelineTimedTrack, id: string, targetStart: number) => {
     replaceState((current) => {
       const duration = getProjectDurationSpeedAware(current.clips);
-      if (track === 'subtitle') return {
+      if (track === 'subtitle' || track === 'tts') return {
         ...current,
         subtitles: current.subtitles.map((cue) => cue.id === id ? { ...cue, ...moveTimedRange(cue.startTime, cue.endTime, targetStart, duration) } : cue),
       };
@@ -767,6 +769,10 @@ export default function Editor() {
       setToast({ kind: 'error', message: t('invalid_audio') });
       return;
     }
+    if (state.backgroundMusic && !replaceSource && !window.confirm(t('confirm_replace_audio'))) return;
+    videoRef.current?.pause();
+    backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
+    setIsPlaying(false);
     const url = createTrackedUrl(file);
 
     // Read the real source duration from local metadata (no upload).
@@ -826,8 +832,8 @@ export default function Editor() {
         segments: [segment],
       },
     }));
-    setSelectedAudioSegmentId(newTrackId);
-  }, [createTrackedUrl, previewProjectTime, state.clips, state.backgroundMusic, t, updateState]);
+    selectEditorItem({ kind: 'background-audio', id: newTrackId });
+  }, [createTrackedUrl, previewProjectTime, selectEditorItem, state.clips, state.backgroundMusic, t, updateState]);
 
   // ─── Clip Actions ────────────────────────────────────────────────────────
 
@@ -845,20 +851,32 @@ export default function Editor() {
       const transitions = current.transitions.filter((tr) => tr.afterClipId !== id);
       return { ...current, clips, activeClipId, transitions };
     });
-  }, [updateState]);
+    if ((selection?.kind === 'video' || selection?.kind === 'source-audio') && selection.id === id) selectEditorItem(null);
+  }, [selectEditorItem, selection, updateState]);
 
   const moveClip = useCallback((id: string, direction: -1 | 1) => {
     updateState((current) => {
       const index = current.clips.findIndex((clip) => clip.id === id);
       const clips = moveClipToIndex(current.clips, id, index + direction);
-      return clips === current.clips ? current : { ...current, clips };
+      return clips === current.clips ? current : {
+        ...current,
+        clips,
+        transitions: current.transitions.filter((transition) => transition.afterClipId !== clips.at(-1)?.id),
+      };
     });
   }, [updateState]);
 
   const reorderClip = useCallback((id: string, targetIndex: number) => {
+    videoRef.current?.pause();
+    backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
+    setIsPlaying(false);
     updateState((current) => {
       const clips = moveClipToIndex(current.clips, id, targetIndex);
-      return clips === current.clips ? current : { ...current, clips };
+      return clips === current.clips ? current : {
+        ...current,
+        clips,
+        transitions: current.transitions.filter((transition) => transition.afterClipId !== clips.at(-1)?.id),
+      };
     });
   }, [updateState]);
 
@@ -876,14 +894,21 @@ export default function Editor() {
       return;
     }
     videoRef.current?.pause();
+    backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
     setIsPlaying(false);
     const newId = crypto.randomUUID();
     updateState((current) => {
       if (current.activeClipId !== activeClip.id) return current;
-      const clips = splitClipAt(current.clips, activeClip.id, currentTime, newId);
-      return clips === current.clips ? current : { ...current, clips, activeClipId: newId };
+      const result = splitClipWithTransition(current.clips, current.transitions, activeClip.id, currentTime, newId);
+      return result.clips === current.clips ? current : {
+        ...current,
+        clips: result.clips,
+        transitions: result.transitions,
+        activeClipId: newId,
+      };
     });
-  }, [activeClip, canSplit, currentTime, t, updateState]);
+    selectEditorItem({ kind: selection?.kind === 'source-audio' ? 'source-audio' : 'video', id: newId });
+  }, [activeClip, canSplit, currentTime, selectEditorItem, selection?.kind, t, updateState]);
 
   // ─── Audio Track Segment Actions ──────────────────────────────────────────
 
@@ -893,30 +918,40 @@ export default function Editor() {
    * one track File), so no additional media is written.
    */
   const splitAudioSegmentAt = useCallback((segmentId: string, projectTime: number) => {
+    const source = state.backgroundMusic?.segments.find((segment) => segment.id === segmentId);
+    if (!source) return;
+    const rightId = crypto.randomUUID();
+    const split = splitAudioSegment(source, projectTime, rightId);
+    if (!split) return;
     updateState((current) => {
       const track = current.backgroundMusic;
-      if (!track) return current;
-      let changed = false;
-      const segments = track.segments.flatMap((seg) => {
-        if (seg.id !== segmentId) return [seg];
-        const parts = splitAudioSegment(seg, projectTime, crypto.randomUUID());
-        if (!parts) return [seg];
-        changed = true;
-        return parts;
-      });
-      if (!changed) return current;
+      if (!track || !track.segments.some((segment) => segment.id === segmentId)) return current;
+      const segments = track.segments.flatMap((segment) => segment.id === segmentId ? split : [segment]);
       return { ...current, backgroundMusic: { ...track, segments } };
     });
-  }, [updateState]);
+    selectEditorItem({ kind: 'background-audio', id: rightId });
+  }, [selectEditorItem, state.backgroundMusic, updateState]);
 
-  /** Add another full-source segment at the current project playhead. */
-  const addAudioSegment = useCallback(() => {
+
+  const splitAtPlayhead = useCallback(() => {
+    if (!canContextSplit) {
+      setToast({ kind: 'error', message: t('split_unavailable') });
+      return;
+    }
+    if (selection?.kind === 'background-audio') {
+      splitAudioSegmentAt(selection.id, previewProjectTime);
+      return;
+    }
+    splitActiveClip();
+  }, [canContextSplit, previewProjectTime, selection, splitActiveClip, splitAudioSegmentAt, t]);
+  /** Add another full-source segment at a requested project time. */
+  const addAudioSegment = useCallback((requestedStart = previewProjectTime) => {
     const id = crypto.randomUUID();
     updateState((current) => {
       const track = current.backgroundMusic;
-      if (!track) return current;
+      if (!track || track.duration <= 0) return current;
       const projectDuration = getProjectDurationSpeedAware(current.clips);
-      const projectStart = Math.max(0, Math.min(previewProjectTime, projectDuration || previewProjectTime));
+      const projectStart = Math.max(0, Math.min(requestedStart, projectDuration || requestedStart));
       const segment: AudioTrackSegment = {
         id,
         projectStart,
@@ -928,8 +963,17 @@ export default function Editor() {
       };
       return { ...current, backgroundMusic: { ...track, segments: [...track.segments, segment] } };
     });
-    setSelectedAudioSegmentId(id);
-  }, [previewProjectTime, updateState]);
+    const currentTrack = state.backgroundMusic;
+    if (isPlaying && currentTrack?.url) {
+      const audio = new Audio(currentTrack.url);
+      audio.loop = true;
+      audio.volume = 0;
+      audio.currentTime = 0;
+      backgroundAudioPoolRef.current.set(id, audio);
+      void audio.play().catch(() => setToast({ kind: 'error', message: t('audio_preview_blocked') }));
+    }
+    selectEditorItem({ kind: 'background-audio', id });
+  }, [isPlaying, previewProjectTime, selectEditorItem, state.backgroundMusic, t, updateState]);
 
   /** Delete a segment from the audio track by id. */
   const deleteAudioSegment = useCallback((segmentId: string) => {
@@ -960,9 +1004,8 @@ export default function Editor() {
   }, [replaceState]);
 
   const selectAudioSegment = useCallback((segmentId: string | null) => {
-    setSelectedAudioSegmentId(segmentId);
-    if (segmentId) setInspectorTab('audio');
-  }, []);
+    selectEditorItem(segmentId ? { kind: 'background-audio', id: segmentId } : null);
+  }, [selectEditorItem]);
 
   /**
    * Transient segment edit used by continuous inspector controls (sliders).
@@ -1028,9 +1071,22 @@ export default function Editor() {
     setRenamingClipId(null);
   }, [updateState]);
 
+
+  const cancelAutoTtsForSeek = useCallback(() => {
+    if (ttsModeRef.current !== 'auto' && !lastTtsCueIdRef.current) return;
+    ttsRequestIdRef.current += 1;
+    ttsBufferSourceRef.current?.stop();
+    ttsBufferSourceRef.current = null;
+    localTtsAudioRef.current?.pause();
+    localTtsAudioRef.current = null;
+    ttsModeRef.current = null;
+    lastTtsCueIdRef.current = null;
+    setTtsPlaying(false);
+  }, []);
   // ─── Playback ────────────────────────────────────────────────────────────
 
   const seekTimeline = useCallback((clipId: string, sourceTime: number) => {
+    cancelAutoTtsForSeek();
     const clip = state.clips.find((item) => item.id === clipId);
     if (!clip) return;
     const target = Math.max(clip.trimStart, Math.min(clip.trimEnd, sourceTime));
@@ -1042,28 +1098,52 @@ export default function Editor() {
     pendingSeekRef.current = { clipId, sourceTime: target };
     continuePlaybackRef.current = isPlaying;
     replaceState((current) => ({ ...current, activeClipId: clipId }));
-  }, [activeClip?.id, isPlaying, replaceState, state.clips]);
+  }, [activeClip?.id, cancelAutoTtsForSeek, isPlaying, replaceState, state.clips]);
 
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video || !activeClip) return;
     if (video.paused) {
+      if (typeof AudioContext !== 'undefined') {
+        const context = ttsAudioContextRef.current ?? new AudioContext();
+        ttsAudioContextRef.current = context;
+        void context.resume();
+      }
       if (video.currentTime < activeClip.trimStart || video.currentTime >= activeClip.trimEnd) {
         video.currentTime = activeClip.trimStart;
       }
-      void video.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+      const track = state.backgroundMusic;
+      if (track?.url) {
+        track.segments.forEach((segment) => {
+          const audio = backgroundAudioPoolRef.current.get(segment.id) ?? new Audio(track.url);
+          backgroundAudioPoolRef.current.set(segment.id, audio);
+          const duration = segment.trimEnd - segment.trimStart;
+          const active = previewProjectTime >= segment.projectStart && previewProjectTime < segment.projectStart + duration;
+          audio.loop = true;
+          audio.currentTime = Math.max(0, active ? segment.trimStart + previewProjectTime - segment.projectStart : segment.trimStart);
+          audio.volume = active ? Math.max(0, Math.min(1, backgroundAudioGainAtTime(segment, previewProjectTime) * state.masterVolume / 100)) : 0;
+          audio.playbackRate = Math.max(0.25, Math.min(4, state.playbackSpeed));
+          void audio.play().catch(() => setToast({ kind: 'error', message: t('audio_preview_blocked') }));
+        });
+      }
+      void video.play().then(() => setIsPlaying(true)).catch(() => {
+        backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
+        setIsPlaying(false);
+      });
     } else {
       video.pause();
+      backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
       setIsPlaying(false);
     }
-  }, [activeClip]);
+  }, [activeClip, previewProjectTime, state.backgroundMusic, state.masterVolume, state.playbackSpeed, t]);
 
   const seek = useCallback((seconds: number) => {
+    cancelAutoTtsForSeek();
     const video = videoRef.current;
     if (!video || !activeClip) return;
     video.currentTime = Math.min(activeClip.trimEnd, Math.max(activeClip.trimStart, video.currentTime + seconds));
     setCurrentTime(video.currentTime);
-  }, [activeClip]);
+  }, [activeClip, cancelAutoTtsForSeek]);
 
   // ─── Fullscreen ──────────────────────────────────────────────────────────
 
@@ -1092,13 +1172,13 @@ export default function Editor() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !activeClip) return;
-    if (activeClip.muted) {
+    if (activeClip.muted || state.backgroundMusic?.replaceOriginalAudio) {
       video.volume = 0;
     } else {
       const effective = (activeClip.volume / 100) * (state.masterVolume / 100);
       video.volume = Math.min(1.0, Math.max(0, effective));
     }
-  }, [activeClip, state.masterVolume]);
+  }, [activeClip, state.backgroundMusic?.replaceOriginalAudio, state.masterVolume]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1106,6 +1186,40 @@ export default function Editor() {
     video.playbackRate = Math.max(0.0625, Math.min(16, (activeClip.speed || 1) * state.playbackSpeed));
   }, [activeClip, state.playbackSpeed]);
 
+
+
+  useEffect(() => {
+    const track = state.backgroundMusic;
+    if (!isPlaying || !track?.url) {
+      backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
+      return;
+    }
+
+    const validIds = new Set(track.segments.map((segment) => segment.id));
+    backgroundAudioPoolRef.current.forEach((audio, id) => {
+      if (!validIds.has(id)) {
+        audio.pause();
+        backgroundAudioPoolRef.current.delete(id);
+      }
+    });
+
+    track.segments.forEach((segment) => {
+      const audio = backgroundAudioPoolRef.current.get(segment.id) ?? new Audio(track.url);
+      backgroundAudioPoolRef.current.set(segment.id, audio);
+      const duration = segment.trimEnd - segment.trimStart;
+      const active = previewProjectTime >= segment.projectStart && previewProjectTime < segment.projectStart + duration;
+      audio.loop = true;
+      audio.playbackRate = Math.max(0.25, Math.min(4, state.playbackSpeed));
+      if (active) {
+        const sourceTime = segment.trimStart + (previewProjectTime - segment.projectStart);
+        if (!Number.isFinite(audio.duration) || Math.abs(audio.currentTime - sourceTime) > 0.2) audio.currentTime = Math.max(0, sourceTime);
+        audio.volume = Math.max(0, Math.min(1, backgroundAudioGainAtTime(segment, previewProjectTime) * state.masterVolume / 100));
+      } else {
+        audio.volume = 0;
+      }
+      if (audio.paused) void audio.play().catch(() => undefined);
+    });
+  }, [isPlaying, previewProjectTime, state.backgroundMusic, state.masterVolume, state.playbackSpeed]);
   // ─── FFmpeg & Export ─────────────────────────────────────────────────────
 
   const ensureFfmpeg = useCallback(async () => {
@@ -1450,10 +1564,11 @@ export default function Editor() {
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     objectUrlsRef.current.clear();
     reset(DEFAULT_STATE);
+    selectEditorItem(null);
     setProjectNameInput('');
     await refreshProjects();
     setToast({ kind: 'success', message: t('project_created') });
-  }, [forceSaveCurrentProject, projectNameInput, refreshProjects, reset, t]);
+  }, [forceSaveCurrentProject, projectNameInput, refreshProjects, reset, selectEditorItem, t]);
 
   const handleSwitchProject = useCallback(async (id: string) => {
     if (id === currentProjectId) return;
@@ -1465,9 +1580,10 @@ export default function Editor() {
     setCurrentProjectId(project.id);
     const editorState = draftToEditorState(project.state, createTrackedUrl);
     reset(editorState);
+    selectEditorItem(null);
     setToast({ kind: 'success', message: t('project_switched') });
     setShowProjectManager(false);
-  }, [createTrackedUrl, currentProjectId, forceSaveCurrentProject, reset, t]);
+  }, [createTrackedUrl, currentProjectId, forceSaveCurrentProject, reset, selectEditorItem, t]);
 
   const handleRenameProject = useCallback(async (id: string, newName: string) => {
     if (!newName.trim()) return;
@@ -1499,13 +1615,54 @@ export default function Editor() {
         objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
         objectUrlsRef.current.clear();
         reset(DEFAULT_STATE);
+        selectEditorItem(null);
       }
     }
     await refreshProjects();
     setToast({ kind: 'success', message: t('project_deleted') });
-  }, [currentProjectId, forceSaveCurrentProject, handleSwitchProject, refreshProjects, reset, t]);
+  }, [currentProjectId, forceSaveCurrentProject, handleSwitchProject, refreshProjects, reset, selectEditorItem, t]);
 
   // ─── Keyboard Shortcuts ──────────────────────────────────────────────────
+
+  const deleteSelectedMaterial = useCallback(() => {
+    if (!selection) {
+      if (activeClip) removeClip(activeClip.id);
+      return;
+    }
+    updateState((current) => {
+      switch (selection.kind) {
+        case 'video': {
+          const index = current.clips.findIndex((clip) => clip.id === selection.id);
+          if (index < 0) return current;
+          const clips = current.clips.filter((clip) => clip.id !== selection.id);
+          return {
+            ...current,
+            clips,
+            activeClipId: clips[Math.min(index, clips.length - 1)]?.id ?? null,
+            transitions: current.transitions.filter((transition) => transition.afterClipId !== selection.id),
+          };
+        }
+        case 'source-audio':
+          return { ...current, clips: current.clips.map((clip) => clip.id === selection.id ? { ...clip, muted: true } : clip) };
+        case 'background-audio':
+          return current.backgroundMusic ? { ...current, backgroundMusic: { ...current.backgroundMusic, segments: current.backgroundMusic.segments.filter((segment) => segment.id !== selection.id) } } : current;
+        case 'subtitle':
+          return selectedSubtitleTrack === 'tts'
+            ? { ...current, subtitles: current.subtitles.map((cue) => cue.id === selection.id && cue.tts ? { ...cue, tts: { ...cue.tts, enabled: false } } : cue) }
+            : { ...current, subtitles: current.subtitles.filter((cue) => cue.id !== selection.id) };
+        case 'image':
+          return { ...current, visualOverlays: current.visualOverlays.filter((overlay) => overlay.id !== selection.id) };
+        case 'effect': {
+          if (selection.id.startsWith('text:')) return { ...current, textOverlays: current.textOverlays.filter((overlay) => overlay.id !== selection.id.slice(5)) };
+          if (selection.id.startsWith('overlay:')) return { ...current, visualOverlays: current.visualOverlays.filter((overlay) => overlay.id !== selection.id.slice(8)) };
+          if (selection.id.startsWith('transition:')) return { ...current, transitions: current.transitions.filter((transition) => transition.afterClipId !== selection.id.slice(11)) };
+          if (selection.id === 'filters:global') return { ...current, filters: { brightness: 100, contrast: 100, saturation: 100 } };
+          return current;
+        }
+      }
+    });
+    selectEditorItem(null);
+  }, [activeClip, removeClip, selectEditorItem, selectedSubtitleTrack, selection, updateState]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1527,11 +1684,23 @@ export default function Editor() {
           return;
         }
       }
-      if (exportModalOpen || showHelpModal || showProjectManager || editing) return;
+      if (exportModalOpen || showHelpModal || showProjectManager) return;
+      const timelineItemFocused = Boolean(target?.closest('[data-timeline-item]'));
+      if (timelineItemFocused && !event.ctrlKey && !event.metaKey && event.code === 'KeyS') {
+        event.preventDefault();
+        splitAtPlayhead();
+        return;
+      }
+      if (timelineItemFocused && event.code === 'Delete') {
+        event.preventDefault();
+        deleteSelectedMaterial();
+        return;
+      }
+      if (editing) return;
 
       if (event.key === '?') { event.preventDefault(); setShowHelpModal(true); return; }
       if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
-      if (!event.ctrlKey && !event.metaKey && event.code === 'KeyS') { event.preventDefault(); splitActiveClip(); }
+      if (!event.ctrlKey && !event.metaKey && event.code === 'KeyS') { event.preventDefault(); splitAtPlayhead(); }
       if (!event.ctrlKey && !event.metaKey && event.code === 'KeyF') { event.preventDefault(); toggleFullscreen(); }
       if (!event.ctrlKey && !event.metaKey && event.code === 'KeyM' && activeClip) {
         event.preventDefault();
@@ -1547,13 +1716,13 @@ export default function Editor() {
       }
       if ((event.ctrlKey || event.metaKey) && event.code === 'KeyY') { event.preventDefault(); redo(); }
       if ((event.ctrlKey || event.metaKey) && event.code === 'KeyE') { event.preventDefault(); void handleExport('mp4'); }
-      if (event.code === 'Delete' && activeClip) { event.preventDefault(); removeClip(activeClip.id); }
+      if (event.code === 'Delete') { event.preventDefault(); deleteSelectedMaterial(); }
       if (event.code === 'ArrowLeft') { event.preventDefault(); seek(event.shiftKey ? -1 : -5); }
       if (event.code === 'ArrowRight') { event.preventDefault(); seek(event.shiftKey ? 1 : 5); }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeClip, closeExportModal, exportModalOpen, handleExport, mobilePanel, overlayTool, redo, removeClip, seek, showHelpModal, showProjectManager, splitActiveClip, toggleFullscreen, togglePlay, undo, updateState]);
+  }, [activeClip, closeExportModal, deleteSelectedMaterial, exportModalOpen, handleExport, mobilePanel, overlayTool, redo, removeClip, seek, showHelpModal, showProjectManager, splitAtPlayhead, toggleFullscreen, togglePlay, undo, updateState]);
 
   // ─── State Updaters ──────────────────────────────────────────────────────
 
@@ -1618,8 +1787,8 @@ export default function Editor() {
       ...current,
       textOverlays: [...current.textOverlays, overlay],
     }));
-    setEditingTextId(overlay.id);
-  }, [projectDurationSpeedAware, updateState]);
+    selectEditorItem({ kind: 'effect', id: `text:${overlay.id}` });
+  }, [projectDurationSpeedAware, selectEditorItem, updateState]);
 
   const updateTextOverlay = useCallback((id: string, updates: Partial<TextOverlay>) => {
     replaceState((current) => ({
@@ -1633,8 +1802,8 @@ export default function Editor() {
       ...current,
       textOverlays: current.textOverlays.filter((o) => o.id !== id),
     }));
-    if (editingTextId === id) setEditingTextId(null);
-  }, [editingTextId, updateState]);
+    if (selection?.kind === 'effect' && selection.id === `text:${id}`) selectEditorItem(null);
+  }, [selectEditorItem, selection, updateState]);
 
   // ─── Subtitle CRUD ───────────────────────────────────────────────────────
 
@@ -1644,8 +1813,8 @@ export default function Editor() {
       ...current,
       subtitles: [...current.subtitles, cue],
     }));
-    setEditingSubtitleId(cue.id);
-  }, [previewProjectTime, updateState]);
+    selectEditorItem({ kind: 'subtitle', id: cue.id });
+  }, [previewProjectTime, selectEditorItem, updateState]);
 
   const updateSubtitle = useCallback((id: string, updates: Partial<SubtitleCue>) => {
     replaceState((current) => ({
@@ -1659,8 +1828,8 @@ export default function Editor() {
       ...current,
       subtitles: current.subtitles.filter((s) => s.id !== id),
     }));
-    if (editingSubtitleId === id) setEditingSubtitleId(null);
-  }, [editingSubtitleId, updateState]);
+    if (selection?.kind === 'subtitle' && selection.id === id) selectEditorItem(null);
+  }, [selectEditorItem, selection, updateState]);
 
   // ─── Visual Overlay CRUD ─────────────────────────────────────────────────
 
@@ -1669,8 +1838,11 @@ export default function Editor() {
       ...current,
       visualOverlays: [...current.visualOverlays, overlay],
     }));
-    setSelectedOverlayId(overlay.id);
-  }, [updateState]);
+    selectEditorItem({
+      kind: overlay.type === 'image' ? 'image' : 'effect',
+      id: overlay.type === 'image' ? overlay.id : `overlay:${overlay.id}`,
+    });
+  }, [selectEditorItem, updateState]);
 
   const updateVisualOverlay = useCallback((id: string, updates: Partial<VisualOverlay>) => {
     replaceState((current) => ({
@@ -1684,13 +1856,14 @@ export default function Editor() {
       ...current,
       visualOverlays: current.visualOverlays.filter((o) => o.id !== id),
     }));
-    if (selectedOverlayId === id) setSelectedOverlayId(null);
-  }, [selectedOverlayId, updateState]);
+    if ((selection?.kind === 'image' && selection.id === id)
+      || (selection?.kind === 'effect' && selection.id === `overlay:${id}`)) selectEditorItem(null);
+  }, [selectEditorItem, selection, updateState]);
 
   // ─── Image Import for Overlays ───────────────────────────────────────────
 
   const importImageOverlay = useCallback((file: File) => {
-    if (!file.type.startsWith('image/')) return;
+    if (!file.type.startsWith('image/') && !/\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name)) return;
     const url = createTrackedUrl(file);
     const overlay = createDefaultImageOverlay(previewProjectTime);
     (overlay as ImageOverlay).file = file;
@@ -1698,6 +1871,26 @@ export default function Editor() {
     addVisualOverlay(overlay);
   }, [addVisualOverlay, createTrackedUrl, previewProjectTime]);
 
+
+
+  const importMediaFiles = useCallback(async (files: File[]) => {
+    const videos = files.filter((file) => file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|m4v|avi)$/i.test(file.name));
+    const audios = files.filter((file) => file.type.startsWith('audio/') || /\.(mp3|wav|ogg|aac|flac|m4a)$/i.test(file.name));
+    const images = files.filter((file) => file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name));
+    if (!videos.length && !audios.length && !images.length) {
+      setToast({ kind: 'error', message: t('invalid_file') });
+      return;
+    }
+    if (!currentProjectId && videos.length === 0) {
+      const project = await createDraft(t('untitled'), editorStateToDraft(DEFAULT_STATE));
+      setCurrentProjectId(project.id);
+      setProjects((current) => [project, ...current]);
+    }
+    if (videos.length) await importFiles(videos);
+    if (audios.length) await importBackgroundAudio(audios[0]);
+    images.forEach(importImageOverlay);
+    if (audios.length > 1) setToast({ kind: 'success', message: t('audio_single_source_notice') });
+  }, [currentProjectId, importBackgroundAudio, importFiles, importImageOverlay, t]);
   // ─── Drawing Pointer Handlers ────────────────────────────────────────────
 
   const handlePreviewPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -1828,10 +2021,12 @@ export default function Editor() {
     return blob;
   }, []);
 
-  /** Preview using local TTS (export-consistent WAV playback) */
-  const previewTts = useCallback(async (cue: SubtitleCue) => {
+  /** Preview using local TTS (export-consistent WAV playback). */
+  const previewTts = useCallback(async (cue: SubtitleCue, mode: 'auto' | 'manual' = 'manual') => {
     if (!cue.tts || !cue.text.trim()) return;
-    // Stop any existing playback
+    const requestId = ++ttsRequestIdRef.current;
+    ttsBufferSourceRef.current?.stop();
+    ttsBufferSourceRef.current = null;
     if (localTtsAudioRef.current) {
       localTtsAudioRef.current.pause();
       localTtsAudioRef.current = null;
@@ -1840,22 +2035,56 @@ export default function Editor() {
       URL.revokeObjectURL(localTtsUrlRef.current);
       localTtsUrlRef.current = null;
     }
-    if (ttsSupported) window.speechSynthesis?.cancel();
+    const audioContext = typeof AudioContext !== 'undefined'
+      ? (ttsAudioContextRef.current ?? new AudioContext())
+      : null;
+    if (audioContext) ttsAudioContextRef.current = audioContext;
+    const resumePromise = audioContext?.resume();
 
     try {
       const blob = await synthesizeLocalTts(cue);
+      if (requestId !== ttsRequestIdRef.current) return;
+      if (mode === 'auto' && lastTtsCueIdRef.current !== cue.id) return;
+      const playbackRate = Math.max(0.5, Math.min(4, cue.tts.rate * (mode === 'auto' ? state.playbackSpeed : 1)));
+      const volume = Math.max(0, Math.min(2, cue.tts.volume * state.masterVolume / 100));
+
+      if (audioContext) {
+        await resumePromise;
+        const buffer = await audioContext.decodeAudioData(await blob.arrayBuffer());
+        if (requestId !== ttsRequestIdRef.current) return;
+        const source = audioContext.createBufferSource();
+        const gain = audioContext.createGain();
+        source.buffer = buffer;
+        source.playbackRate.value = playbackRate;
+        gain.gain.value = volume;
+        source.connect(gain).connect(audioContext.destination);
+        source.onended = () => {
+          if (ttsBufferSourceRef.current === source) {
+            ttsBufferSourceRef.current = null;
+            ttsModeRef.current = null;
+            setTtsPlaying(false);
+          }
+        };
+        ttsBufferSourceRef.current = source;
+        ttsModeRef.current = mode;
+        setTtsPlaying(true);
+        source.start();
+        return;
+      }
+
       const url = URL.createObjectURL(blob);
       localTtsUrlRef.current = url;
       const audio = new Audio(url);
-      audio.playbackRate = Math.max(0.5, Math.min(2, cue.tts.rate));
-      audio.volume = Math.max(0, Math.min(1, cue.tts.volume));
-      audio.onended = () => { setTtsPlaying(false); };
-      audio.onerror = () => { setTtsPlaying(false); };
+      audio.playbackRate = playbackRate;
+      audio.volume = Math.min(1, volume);
+      audio.onended = () => { if (localTtsAudioRef.current === audio) { ttsModeRef.current = null; setTtsPlaying(false); } };
+      audio.onerror = () => { if (localTtsAudioRef.current === audio) { ttsModeRef.current = null; setTtsPlaying(false); } };
       localTtsAudioRef.current = audio;
-      ttsModeRef.current = 'manual';
+      ttsModeRef.current = mode;
       setTtsPlaying(true);
       await audio.play();
     } catch (error) {
+      if (requestId !== ttsRequestIdRef.current) return;
       console.error('Local TTS preview failed', error);
       setLocalTtsPhase('idle');
       setLocalTtsCueId(null);
@@ -1864,9 +2093,12 @@ export default function Editor() {
       const modelDownloadFailed = error instanceof Error && error.name === 'TtsModelDownloadError';
       setToast({ kind: 'error', message: t(modelDownloadFailed ? 'tts_model_download_failed' : 'tts_generation_failed') });
     }
-  }, [synthesizeLocalTts, ttsSupported, t]);
+  }, [state.masterVolume, state.playbackSpeed, synthesizeLocalTts, t]);
 
   const stopTts = useCallback(() => {
+    ttsRequestIdRef.current += 1;
+    ttsBufferSourceRef.current?.stop();
+    ttsBufferSourceRef.current = null;
     if (localTtsAudioRef.current) {
       localTtsAudioRef.current.pause();
       localTtsAudioRef.current = null;
@@ -1875,11 +2107,23 @@ export default function Editor() {
       URL.revokeObjectURL(localTtsUrlRef.current);
       localTtsUrlRef.current = null;
     }
-    if (ttsSupported) window.speechSynthesis?.cancel();
     ttsModeRef.current = null;
     setTtsPlaying(false);
-  }, [ttsSupported]);
+  }, []);
 
+
+
+  useEffect(() => {
+    const activeCue = isPlaying ? getActiveTtsCue(state.subtitles, previewProjectTime) : null;
+    if (!activeCue?.tts?.enabled || !activeCue.text.trim()) {
+      lastTtsCueIdRef.current = null;
+      if (ttsModeRef.current === 'auto') stopTts();
+      return;
+    }
+    if (activeCue.id === lastTtsCueIdRef.current) return;
+    lastTtsCueIdRef.current = activeCue.id;
+    void previewTts(activeCue, 'auto');
+  }, [isPlaying, previewProjectTime, previewTts, state.subtitles, stopTts]);
   // ─── Preview CSS ─────────────────────────────────────────────────────────
 
   // H5: Compute preview aspect ratio and fit mode CSS
@@ -1910,9 +2154,7 @@ export default function Editor() {
 
   return (
     <div className="flex h-dvh min-h-[560px] flex-col overflow-hidden bg-[var(--app)] text-[var(--text)]">
-      <input ref={fileInputRef} type="file" accept="video/*" multiple className="sr-only" onChange={(event) => { void importFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
-      <input ref={audioInputRef} type="file" accept="audio/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) void importBackgroundAudio(f); event.target.value = ''; }} />
-      <input ref={audioReplaceInputRef} type="file" accept="audio/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) void importBackgroundAudio(f, true); event.target.value = ''; }} />
+      <input ref={fileInputRef} type="file" accept="video/*,audio/*,image/*" multiple className="sr-only" onChange={(event) => { void importMediaFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
       <input ref={imageInputRef} type="file" accept="image/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) importImageOverlay(f); event.target.value = ''; }} aria-label={t('add_image')} />
 
       {/* ─── Header ──────────────────────────────────────────────────────── */}
@@ -1968,7 +2210,7 @@ export default function Editor() {
           <div role="list" className={`flex-1 space-y-2 overflow-y-auto p-2 ${leftPanelCollapsed ? 'lg:hidden' : ''}`}>
             {state.clips.map((clip, index) => (
               <div key={clip.id} role="listitem" className={`group relative rounded-lg border p-1.5 transition ${state.activeClipId === clip.id ? 'border-indigo-500 bg-indigo-500/10' : 'border-[var(--border)] bg-[var(--raised)] hover:border-indigo-400'}`}>
-                <button onClick={() => { replaceState((current) => ({ ...current, activeClipId: clip.id })); setMobilePanel(null); }} className="block w-full rounded text-left" aria-current={state.activeClipId === clip.id ? 'true' : undefined}>
+                <button onClick={() => { selectVideoClip(clip.id); }} className="block w-full rounded text-left" aria-current={state.activeClipId === clip.id ? 'true' : undefined}>
                   <span className="relative flex aspect-video items-center justify-center overflow-hidden rounded bg-gradient-to-br from-indigo-500/20 via-[var(--canvas)] to-cyan-500/10">
                     <FileVideo className="h-7 w-7 text-indigo-500/60" aria-hidden="true" />
                     <span className="absolute bottom-1.5 right-1.5 rounded bg-black/70 px-1.5 py-0.5 text-xs text-white">{t('duration', { value: clip.duration.toFixed(1) })}</span>
@@ -2001,7 +2243,35 @@ export default function Editor() {
                 </details>
               </div>
             ))}
-            {!state.clips.length && <p className="m-2 rounded-lg border border-dashed border-[var(--border)] p-5 text-center text-xs leading-5 text-[var(--muted)]">{t('no_assets')}</p>}
+            {state.backgroundMusic && (
+              <div
+                role="listitem"
+                draggable
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = 'copy';
+                  event.dataTransfer.setData('application/x-cutfish-audio', state.backgroundMusic!.name);
+                }}
+                className="rounded-lg border border-emerald-600/40 bg-emerald-500/10 p-2"
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    const first = state.backgroundMusic?.segments[0];
+                    selectEditorItem(first ? { kind: 'background-audio', id: first.id } : null);
+                    if (!first) setInspectorTab('audio');
+                  }}
+                  className="flex w-full items-center gap-2 text-left"
+                >
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-emerald-500/15"><Music className="h-5 w-5 text-emerald-400" /></span>
+                  <span className="min-w-0 flex-1"><strong className="block truncate text-xs">{state.backgroundMusic.name}</strong><span className="text-[10px] text-[var(--muted)]">A2 · {t('duration', { value: state.backgroundMusic.duration.toFixed(1) })} · {t('drag_to_timeline')}</span></span>
+                </button>
+                <div className="mt-2 flex gap-1 border-t border-emerald-600/20 pt-2">
+                  <button type="button" onClick={() => addAudioSegment()} disabled={state.backgroundMusic.duration <= 0} className="flex flex-1 items-center justify-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-xs hover:border-emerald-400 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />{t('add_to_timeline')}</button>
+                  <button type="button" onClick={() => { updateState((current) => ({ ...current, backgroundMusic: null })); selectEditorItem(null); }} className={`${iconButton} hover:text-red-500`} aria-label={t('delete_audio_track')}><Trash2 className="h-3.5 w-3.5" /></button>
+                </div>
+              </div>
+            )}
+            {!state.clips.length && !state.backgroundMusic && <p className="m-2 rounded-lg border border-dashed border-[var(--border)] p-5 text-center text-xs leading-5 text-[var(--muted)]">{t('no_assets')}</p>}
           </div>
           {!leftPanelCollapsed && maximizedPanel !== 'media' && <div role="separator" aria-label={t('resize_media_panel')} aria-orientation="vertical" aria-valuemin={180} aria-valuemax={640} aria-valuenow={Math.round(leftPanelWidth)} tabIndex={0} className="absolute inset-y-0 right-0 z-40 hidden w-2 translate-x-1/2 cursor-col-resize touch-none lg:block" onPointerDown={(event) => startWorkspaceResize(event, 'media')} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); resizeWorkspaceFromKeyboard('media', (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 48 : 16)); }} />}
         </aside>
@@ -2022,7 +2292,7 @@ export default function Editor() {
             onDragEnter={(event) => { if (Array.from(event.dataTransfer.types).includes('Files')) { event.preventDefault(); setIsDragging(true); } }}
             onDragOver={(event) => { if (Array.from(event.dataTransfer.types).includes('Files')) event.preventDefault(); }}
             onDragLeave={(event) => { if (event.currentTarget === event.target) setIsDragging(false); }}
-            onDrop={(event) => { if (!Array.from(event.dataTransfer.types).includes('Files')) return; event.preventDefault(); setIsDragging(false); void importFiles(Array.from(event.dataTransfer.files)); }}
+            onDrop={(event) => { if (!Array.from(event.dataTransfer.types).includes('Files')) return; event.preventDefault(); setIsDragging(false); void importMediaFiles(Array.from(event.dataTransfer.files)); }}
           >
             {!activeClip ? (
               <button onClick={() => fileInputRef.current?.click()} disabled={Boolean(importProgress)} className="group relative flex aspect-video w-full max-w-3xl flex-col items-center justify-center gap-4 overflow-hidden rounded-xl border border-dashed border-[var(--border)] bg-[var(--panel)] p-6 shadow-xl transition hover:border-indigo-500 disabled:opacity-50" aria-label={t('upload_media')}>
@@ -2042,7 +2312,7 @@ export default function Editor() {
               >
                 <video
                   key={activeClip.id} ref={videoRef} src={activeClip.url} playsInline
-                  muted={activeClip.muted}
+                  muted={activeClip.muted || state.backgroundMusic?.replaceOriginalAudio === true}
                   className="relative z-10 max-h-full max-w-full object-contain" style={previewStyle}
                   onLoadedMetadata={(event) => {
                     const pending = pendingSeekRef.current?.clipId === activeClip.id ? pendingSeekRef.current : null;
@@ -2115,7 +2385,7 @@ export default function Editor() {
                         borderRadius: '2px',
                         outline: editingSubtitleId === cue.id ? '2px solid #6366f1' : undefined,
                       }}
-                      onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); setEditingSubtitleId(cue.id); setInspectorTab('subtitles'); } }}
+                      onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); selectEditorItem({ kind: 'subtitle', id: cue.id }); } }}
                     >{cue.text || '…'}</div>
                   );
                 })}
@@ -2142,7 +2412,7 @@ export default function Editor() {
                           backgroundColor: overlay.fillColor || undefined,
                           borderRadius: `${overlay.borderRadius}px`,
                         }}
-                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); setSelectedOverlayId(overlay.id); setInspectorTab('subtitles'); } }}
+                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); selectEditorItem({ kind: 'effect', id: `overlay:${overlay.id}` }); } }}
                       />
                     );
                   }
@@ -2152,7 +2422,7 @@ export default function Editor() {
                       <img key={overlay.id} src={(overlay as ImageOverlay).url} alt=""
                         className={`z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
                         style={overlayStyle}
-                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); setSelectedOverlayId(overlay.id); setInspectorTab('subtitles'); } }}
+                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); selectEditorItem({ kind: 'image', id: overlay.id }); } }}
                       />
                     );
                   }
@@ -2161,7 +2431,7 @@ export default function Editor() {
                       <svg key={overlay.id}
                         className={`z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
                         style={overlayStyle} viewBox="0 0 100 100" preserveAspectRatio="none"
-                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); setSelectedOverlayId(overlay.id); setInspectorTab('subtitles'); } }}
+                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); selectEditorItem({ kind: 'effect', id: `overlay:${overlay.id}` }); } }}
                       >
                         <polyline
                           points={(overlay as DrawingOverlay).points.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')}
@@ -2209,7 +2479,7 @@ export default function Editor() {
           {/* ─── Transport Controls ──────────────────────────────────────── */}
           <div className="flex h-14 shrink-0 items-center justify-center gap-3 border-t border-[var(--border)] bg-[var(--panel)] sm:gap-5">
             <button onClick={() => seek(-5)} disabled={!activeClip} className={iconButton} aria-label={t('back_five')} title={t('back_five')}><RotateCcw className="h-4 w-4" /></button>
-            <button onClick={splitActiveClip} disabled={!canSplit} className={iconButton} aria-label={`${t('split_clip')} (S)`} title={`${t('split_clip')} (S)`}><Scissors className="h-4 w-4" /></button>
+            <button onClick={splitAtPlayhead} disabled={!canContextSplit} className={iconButton} aria-label={`${t('split_at_playhead')} (S)`} title={canContextSplit ? `${t('split_at_playhead')} (S)` : t('split_unavailable')}><Scissors className="h-4 w-4" /></button>
             <button onClick={togglePlay} disabled={!activeClip} className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--text)] text-[var(--panel)] transition hover:scale-105 disabled:cursor-not-allowed disabled:opacity-40" aria-label={isPlaying ? t('pause') : t('play')}>{isPlaying ? <Pause className="h-5 w-5" /> : <Play className="ml-0.5 h-5 w-5" />}</button>
             <button onClick={() => seek(5)} disabled={!activeClip} className={iconButton} aria-label={t('forward_five')} title={t('forward_five')}><RotateCw className="h-4 w-4" /></button>
             {/* Compare hold */}
@@ -2278,17 +2548,6 @@ export default function Editor() {
                   <div className="space-y-4">
                     <RangeControl label={t('trim_start')} value={activeClip?.trimStart ?? 0} min={0} max={Math.max(0, (activeClip?.trimEnd ?? 0) - 0.01)} step={0.01} unit="s" disabled={!activeClip} onChange={(value) => updateTrim('trimStart', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <RangeControl label={t('trim_end')} value={activeClip?.trimEnd ?? 0} min={Math.min(activeClip?.duration ?? 0, (activeClip?.trimStart ?? 0) + 0.01)} max={activeClip?.duration ?? 0} step={0.01} unit="s" disabled={!activeClip} onChange={(value) => updateTrim('trimEnd', value)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
-                  </div>
-                </section>
-                {/* Volume / Mute */}
-                <section aria-labelledby="clip-vol-heading">
-                  <h2 id="clip-vol-heading" className="mb-3 text-sm font-semibold">{t('clip_volume')}</h2>
-                  <div className="space-y-3">
-                    <RangeControl label={t('volume')} value={activeClip?.volume ?? 100} min={0} max={200} disabled={!activeClip} onChange={(v) => activeClip && updateClipField(activeClip.id, 'volume', v)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
-                    <button disabled={!activeClip} onClick={() => activeClip && updateState((c) => ({ ...c, clips: c.clips.map((cl) => cl.id === activeClip.id ? { ...cl, muted: !cl.muted } : cl) }))} className={`flex items-center gap-2 rounded px-2 py-1 text-xs ${activeClip?.muted ? 'text-red-500' : 'text-[var(--muted)]'} hover:bg-[var(--raised)] disabled:opacity-40`}>
-                      {activeClip?.muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
-                      {activeClip?.muted ? t('unmute') : t('mute')}
-                    </button>
                   </div>
                 </section>
                 {/* Rotation / Flip */}
@@ -2406,29 +2665,41 @@ export default function Editor() {
             {/* ── Audio Tab ────────────────────────────────────────────── */}
             {inspectorTab === 'audio' && (
               <>
-                <section aria-labelledby="audio-heading">
-                  <h2 id="audio-heading" className="mb-3 text-sm font-semibold">{t('audio')} <span className="text-[var(--muted)]">· {t('global')}</span></h2>
-                  <div className="space-y-4">
+                {selection?.kind === 'source-audio' && activeClip && (
+                  <section aria-labelledby="source-audio-heading" className="rounded border border-amber-500/30 bg-amber-500/5 p-3">
+                    <h2 id="source-audio-heading" className="mb-1 text-sm font-semibold">{t('source_audio_track')}</h2>
+                    <p className="mb-3 text-xs text-[var(--muted)]">{activeClip.displayName} · {t('linked_to_video')}</p>
+                    <div className="space-y-3">
+                      <RangeControl label={t('volume')} value={activeClip.volume} min={0} max={200} onChange={(v) => updateClipField(activeClip.id, 'volume', v)} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                      <button onClick={() => updateClipField(activeClip.id, 'muted', !activeClip.muted)} className={`flex w-full items-center justify-center gap-2 rounded border px-2 py-2 text-xs ${activeClip.muted ? 'border-emerald-500/40 text-emerald-400' : 'border-red-500/30 text-red-400'}`}>
+                        {activeClip.muted ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+                        {activeClip.muted ? t('restore_source_audio') : t('remove_source_audio')}
+                      </button>
+                    </div>
+                  </section>
+                )}
+                <details className="rounded border border-[var(--border)] p-3">
+                  <summary className="cursor-pointer text-sm font-semibold">{t('project_audio_settings')}</summary>
+                  <div className="mt-4 space-y-4">
                     <RangeControl label={t('audio_sync')} value={state.audioDelay} min={-5000} max={5000} step={10} unit="ms" onChange={(value) => replaceState((current) => ({ ...current, audioDelay: value }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <RangeControl label={t('fade_in')} value={state.audioFade.fadeIn} min={0} max={30} step={0.1} unit="s" onChange={(value) => replaceState((current) => ({ ...current, audioFade: { ...current.audioFade, fadeIn: value } }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <RangeControl label={t('fade_out')} value={state.audioFade.fadeOut} min={0} max={30} step={0.1} unit="s" onChange={(value) => replaceState((current) => ({ ...current, audioFade: { ...current.audioFade, fadeOut: value } }))} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                     <p className="text-xs leading-4 text-[var(--muted)]">{t('fade_hint')}</p>
                   </div>
-                </section>
+                </details>
                 {/* Background Audio */}
                 <section aria-labelledby="bg-audio-heading">
                   <h2 id="bg-audio-heading" className="mb-3 text-sm font-semibold">{t('background_audio')}</h2>
                   {state.backgroundMusic ? (() => {
                     const track = state.backgroundMusic;
-                    const selectedSegment = track.segments.find((s) => s.id === effectiveSelectedAudioSegmentId) ?? track.segments[0] ?? null;
+                    const selectedSegment = track.segments.find((s) => s.id === effectiveSelectedAudioSegmentId) ?? null;
                     const sourceDuration = track.duration > 0 ? track.duration : (selectedSegment ? Math.max(0.01, selectedSegment.trimEnd) : 0.01);
                     return (
                     <div className="space-y-3">
                       <div className="flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--raised)] p-2">
                         <Music className="h-4 w-4 shrink-0 text-indigo-500" />
                         <span className="flex-1 truncate text-xs" title={track.name}>{track.name}</span>
-                        <button type="button" onClick={() => audioReplaceInputRef.current?.click()} className="text-[var(--muted)] hover:text-indigo-500" aria-label={t('replace_audio_source')} title={t('replace_audio_source')}><Upload className="h-3.5 w-3.5" /></button>
-                        <button type="button" onClick={() => { updateState((c) => ({ ...c, backgroundMusic: null })); setSelectedAudioSegmentId(null); }} className="text-red-500 hover:text-red-400" aria-label={t('remove_audio')}><Trash2 className="h-3.5 w-3.5" /></button>
+                        <button type="button" onClick={() => { updateState((c) => ({ ...c, backgroundMusic: null })); selectEditorItem(null); }} className="text-red-500 hover:text-red-400" aria-label={t('remove_audio')}><Trash2 className="h-3.5 w-3.5" /></button>
                       </div>
 
                       <div className="rounded border border-indigo-500/30 bg-indigo-500/5 p-2.5">
@@ -2447,11 +2718,11 @@ export default function Editor() {
                           const active = selectedSegment?.id === seg.id;
                           return (
                             <div key={seg.id} className={`flex items-center gap-2 rounded border px-2 py-1.5 text-xs ${active ? 'border-emerald-400 bg-emerald-500/10' : 'border-[var(--border)] bg-[var(--raised)]'}`}>
-                              <button type="button" role="option" aria-selected={active} onClick={() => setSelectedAudioSegmentId(seg.id)} className="flex-1 truncate text-left">
+                              <button type="button" role="option" aria-selected={active} onClick={() => selectAudioSegment(seg.id)} className="flex-1 truncate text-left">
                                 <span className="font-medium">{t('audio_segment_n', { n: i + 1 })}</span>
                                 <span className="ml-2 font-mono text-[var(--muted)]">{seg.projectStart.toFixed(1)}s · {dur.toFixed(1)}s</span>
                               </button>
-                              <button type="button" onClick={() => { deleteAudioSegment(seg.id); if (selectedAudioSegmentId === seg.id) setSelectedAudioSegmentId(null); }} className="text-red-500 hover:text-red-400" aria-label={t('delete_audio_segment', { n: i + 1 })}><Trash2 className="h-3 w-3" /></button>
+                              <button type="button" onClick={() => { deleteAudioSegment(seg.id); if (selection?.kind === 'background-audio' && selection.id === seg.id) selectEditorItem(null); }} className="text-red-500 hover:text-red-400" aria-label={t('delete_audio_segment', { n: i + 1 })}><Trash2 className="h-3 w-3" /></button>
                             </div>
                           );
                         })}
@@ -2461,7 +2732,7 @@ export default function Editor() {
                       {/* Segment tools */}
                       <div className="flex gap-2">
                         <button type="button" disabled={!selectedSegment || previewProjectTime <= selectedSegment.projectStart + 0.01 || previewProjectTime >= selectedSegment.projectStart + (selectedSegment.trimEnd - selectedSegment.trimStart) - 0.01} onClick={() => { if (selectedSegment) splitAudioSegmentAt(selectedSegment.id, previewProjectTime); }} className="flex flex-1 items-center justify-center gap-1.5 rounded border border-[var(--border)] px-2 py-1.5 text-xs hover:border-indigo-500 hover:text-indigo-500 disabled:cursor-not-allowed disabled:opacity-40" aria-label={t('split_audio_segment')} title={t('split_audio_segment')}><Scissors className="h-3.5 w-3.5" />{t('split')}</button>
-                        <button type="button" onClick={addAudioSegment} className="flex flex-1 items-center justify-center gap-1.5 rounded border border-[var(--border)] px-2 py-1.5 text-xs hover:border-indigo-500 hover:text-indigo-500" aria-label={t('add_audio_segment')} title={t('add_audio_segment')}><Plus className="h-3.5 w-3.5" />{t('add_audio_segment')}</button>
+                        <button type="button" onClick={() => addAudioSegment()} className="flex flex-1 items-center justify-center gap-1.5 rounded border border-[var(--border)] px-2 py-1.5 text-xs hover:border-indigo-500 hover:text-indigo-500" aria-label={t('add_audio_segment')} title={t('add_audio_segment')}><Plus className="h-3.5 w-3.5" />{t('add_audio_segment')}</button>
                       </div>
 
                       {/* Selected segment editor */}
@@ -2479,9 +2750,7 @@ export default function Editor() {
                     </div>
                     );
                   })() : (
-                    <button onClick={() => audioInputRef.current?.click()} className="flex w-full items-center justify-center gap-2 rounded border border-dashed border-[var(--border)] px-3 py-3 text-xs text-[var(--muted)] hover:border-indigo-500 hover:text-indigo-500">
-                      <Music className="h-4 w-4" />{t('import_audio')}
-                    </button>
+                    <p className="rounded border border-dashed border-[var(--border)] px-3 py-3 text-xs leading-5 text-[var(--muted)]">{t('import_audio_from_media')}</p>
                   )}
                 </section>
               </>
@@ -2544,7 +2813,7 @@ export default function Editor() {
                     {state.textOverlays.map((overlay) => (
                       <div key={overlay.id} className={`rounded border p-2 ${editingTextId === overlay.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
                         <div className="flex items-center justify-between mb-1">
-                          <button onClick={() => setEditingTextId(editingTextId === overlay.id ? null : overlay.id)} className="text-xs text-indigo-500 hover:underline truncate flex-1 text-left">{overlay.text || t('text_content')}</button>
+                          <button onClick={() => editingTextId === overlay.id ? selectEditorItem(null) : selectEditorItem({ kind: 'effect', id: `text:${overlay.id}` })} className="text-xs text-indigo-500 hover:underline truncate flex-1 text-left">{overlay.text || t('text_content')}</button>
                           <button onClick={() => removeTextOverlay(overlay.id)} className="text-red-500 hover:text-red-400" aria-label={t('remove_text')}><Trash2 className="h-3 w-3" /></button>
                         </div>
                         {editingTextId === overlay.id && (
@@ -2595,7 +2864,7 @@ export default function Editor() {
                   {state.visualOverlays.map((overlay) => (
                     <div key={overlay.id} className={`mb-2 rounded border p-2 ${selectedOverlayId === overlay.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
                       <div className="flex items-center justify-between mb-1">
-                        <button onClick={() => setSelectedOverlayId(selectedOverlayId === overlay.id ? null : overlay.id)} className="text-xs text-indigo-500 hover:underline capitalize">{overlay.type}</button>
+                        <button onClick={() => selectedOverlayId === overlay.id ? selectEditorItem(null) : selectEditorItem({ kind: overlay.type === 'image' ? 'image' : 'effect', id: overlay.type === 'image' ? overlay.id : `overlay:${overlay.id}` })} className="text-xs text-indigo-500 hover:underline capitalize">{overlay.type}</button>
                         <button onClick={() => removeVisualOverlay(overlay.id)} className="text-red-500 hover:text-red-400" aria-label={t('remove_overlay')}><Trash2 className="h-3 w-3" /></button>
                       </div>
                       {selectedOverlayId === overlay.id && (
@@ -2637,13 +2906,12 @@ export default function Editor() {
                     <h2 id="subtitles-heading" className="text-sm font-semibold">{t('subtitles')}</h2>
                     <button onClick={addSubtitle} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10"><Plus className="h-3 w-3" />{t('add_subtitle')}</button>
                   </div>
-                  {!ttsSupported && <p className="text-xs text-amber-600 dark:text-amber-400 mb-2" role="note">{t('tts_browser_unsupported')}</p>}
                   <p className="text-xs text-[var(--muted)] mb-2">{t('tts_media_private')}</p>
                   <div className="space-y-2">
                     {state.subtitles.map((cue) => (
                       <div key={cue.id} className={`rounded border p-2 ${editingSubtitleId === cue.id ? 'border-indigo-500' : 'border-[var(--border)]'}`}>
                         <div className="flex items-center justify-between mb-1">
-                          <button onClick={() => setEditingSubtitleId(editingSubtitleId === cue.id ? null : cue.id)} className="text-xs text-indigo-500 hover:underline truncate flex-1 text-left">{cue.text || t('subtitle_text')}</button>
+                          <button onClick={() => editingSubtitleId === cue.id ? selectEditorItem(null) : selectEditorItem({ kind: 'subtitle', id: cue.id })} className="text-xs text-indigo-500 hover:underline truncate flex-1 text-left">{cue.text || t('subtitle_text')}</button>
                           <button onClick={() => removeSubtitle(cue.id)} className="text-red-500 hover:text-red-400" aria-label={t('remove_subtitle')}><Trash2 className="h-3 w-3" /></button>
                         </div>
                         {editingSubtitleId === cue.id && (
@@ -2698,11 +2966,19 @@ export default function Editor() {
                               <label className="flex items-center gap-2 text-xs mb-2">
                                 <input type="checkbox" checked={cue.tts?.enabled ?? false} onChange={(e) => {
                                   const enabled = e.target.checked;
-                                  if (enabled && !cue.tts) {
-                                    const defVoice = getDefaultLocalVoice(cue.text || undefined);
-                                    updateSubtitle(cue.id, { tts: { enabled: true, voiceURI: '', lang: defVoice.lang, rate: 1, pitch: 1, volume: 1, exportVoiceId: defVoice.id, includeInExport: true } });
-                                  } else if (cue.tts) {
-                                    updateSubtitle(cue.id, { tts: { ...cue.tts, enabled } });
+                                  const defVoice = getDefaultLocalVoice(cue.text || undefined);
+                                  const nextTts = cue.tts
+                                    ? { ...cue.tts, enabled }
+                                    : { enabled, voiceURI: '', lang: defVoice.lang, rate: 1, pitch: 1, volume: 1, exportVoiceId: defVoice.id, includeInExport: true };
+                                  const nextCue = { ...cue, tts: nextTts };
+                                  updateSubtitle(cue.id, { tts: nextTts });
+                                  if (enabled && cue.text.trim()) {
+                                    void synthesizeLocalTts(nextCue).catch((error) => {
+                                      console.error('Local TTS pre-generation failed', error);
+                                      setLocalTtsPhase('idle');
+                                      setLocalTtsCueId(null);
+                                      setToast({ kind: 'error', message: t(error instanceof Error && error.name === 'TtsModelDownloadError' ? 'tts_model_download_failed' : 'tts_generation_failed') });
+                                    });
                                   }
                                 }} className="accent-indigo-500" />
                                 <span className="font-medium">{t('tts_enable')}</span>
@@ -2733,26 +3009,9 @@ export default function Editor() {
                                     }} className="accent-indigo-500" />
                                     <span>{t('tts_include_export')}</span>
                                   </label>
-                                  {/* Browser instant preview voice (for auto-play) */}
-                                  {ttsSupported && (
-                                    <details className="text-xs">
-                                      <summary className="cursor-pointer text-[var(--muted)] hover:text-[var(--text)]">{t('tts_instant_preview')}</summary>
-                                      <div className="mt-1 space-y-1.5">
-                                        <select value={cue.tts.voiceURI} onChange={(e) => {
-                                          const voice = ttsVoices.find((v) => v.voiceURI === e.target.value);
-                                          updateSubtitle(cue.id, { tts: { ...cue.tts!, voiceURI: e.target.value, lang: voice?.lang ?? cue.tts!.lang } });
-                                        }} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs" aria-label={t('tts_voice')}>
-                                          <option value="">{t('tts_voice')}</option>
-                                          {ttsVoices.map((v) => <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>)}
-                                        </select>
-                                        {ttsVoices.length === 0 && <p className="text-xs text-[var(--muted)]">{t('tts_no_voices')}</p>}
-                                      </div>
-                                    </details>
-                                  )}
-                                  {/* Rate / Pitch / Volume */}
-                                  <div className="grid grid-cols-3 gap-1.5">
+                                  {/* Piper rate / volume */}
+                                  <div className="grid grid-cols-2 gap-1.5">
                                     <label className="text-xs text-[var(--muted)]">{t('tts_rate')}<input type="number" min={0.5} max={2} step={0.1} value={cue.tts.rate} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, rate: clampNumber(e.target.value, 0.5, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
-                                    <label className="text-xs text-[var(--muted)]">{t('tts_pitch')}<input type="number" min={0} max={2} step={0.1} value={cue.tts.pitch} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, pitch: clampNumber(e.target.value, 0, 2, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                                     <label className="text-xs text-[var(--muted)]">{t('tts_volume')}<input type="number" min={0} max={1} step={0.1} value={cue.tts.volume} onChange={(e) => updateSubtitle(cue.id, { tts: { ...cue.tts!, volume: clampNumber(e.target.value, 0, 1, 1) } })} className="w-full rounded border border-[var(--border)] bg-[var(--panel)] px-1 py-1 text-xs font-mono" /></label>
                                   </div>
                                   {/* Preview (local WAV) / Stop */}
@@ -2812,6 +3071,7 @@ export default function Editor() {
           {!timelineCollapsed && <button type="button" onClick={() => setMaximizedPanel(maximizedPanel === 'timeline' ? null : 'timeline')} className={iconButton} aria-pressed={maximizedPanel === 'timeline'} aria-label={maximizedPanel === 'timeline' ? t('restore_panel') : t('maximize_panel')} title={maximizedPanel === 'timeline' ? t('restore_panel') : t('maximize_panel')}>{maximizedPanel === 'timeline' ? <Minimize className="h-3.5 w-3.5" /> : <Maximize className="h-3.5 w-3.5" />}</button>}
           <span><strong className="text-[var(--text)]">V1</strong> {t('video_track')}</span>
           <span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('source_audio_track')}</span>
+          {!timelineCollapsed && <button type="button" onClick={splitAtPlayhead} disabled={!canContextSplit} className={`${iconButton} gap-1 px-2`} title={canContextSplit ? t('split_at_playhead') : t('split_unavailable')}><Scissors className="h-3.5 w-3.5" /><span className="hidden sm:inline">{t('cut')}</span></button>}
           <span className="ml-auto hidden font-mono sm:inline">{t('project_duration', { value: projectDurationSpeedAware.toFixed(1) })}{state.transitions.length > 0 && outputDuration < projectDurationSpeedAware - 0.01 ? ` · ${t('output_duration', { value: outputDuration.toFixed(1) })}` : ''}</span>
           {/* Zoom controls */}
           <div className="flex items-center gap-0.5">
@@ -2829,8 +3089,11 @@ export default function Editor() {
               currentTime={currentTime}
               onSeek={seekTimeline}
               onReorder={reorderClip}
+              onSelectVideo={(id) => selectVideoClip(id, 'video')}
+              onSelectSourceAudio={(id) => selectVideoClip(id, 'source-audio')}
               zoom={timelineZoom}
               onZoomChange={setTimelineZoom}
+              hasBackgroundAudioSource={Boolean(state.backgroundMusic)}
               audioSegments={(state.backgroundMusic?.segments ?? []).map((s) => ({
                 id: s.id,
                 name: state.backgroundMusic!.name,
@@ -2841,8 +3104,10 @@ export default function Editor() {
               selectedAudioSegmentId={effectiveSelectedAudioSegmentId}
               onSelectAudioSegment={selectAudioSegment}
               onAudioSegmentMove={moveAudioSegment}
+              onBackgroundAudioDrop={addAudioSegment}
               onAudioEditStart={beginContinuousEdit}
               onAudioEditEnd={finishContinuousEdit}
+              ttsItems={timelineTtsItems}
               subtitleItems={timelineSubtitleItems}
               imageItems={timelineImageItems}
               effectItems={timelineEffectItems}

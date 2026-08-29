@@ -758,6 +758,19 @@ describe('buildFFmpegCommandExtended editable audio track', () => {
     expect(graph).toContain("[3:v]overlay=0:0:shortest=1");
   });
 
+
+  it('applies project master volume to editable audio and TTS layers', () => {
+    const tts: TtsAudioInput[] = [
+      { filename: 'tts.wav', startTime: 1, endTime: 3, sourceTrimStart: 0, rate: 1, volume: 1 },
+    ];
+    const args = buildFFmpegCommandExtended(
+      atClips, filters, 0, noFade, 'mp4', profile, 50, '16:9', 'contain', [], [], null,
+      undefined, [], tts, [twoSegments[0]], false,
+    );
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toContain('channel_layouts=stereo,volume=0.4,afade=t=in');
+    expect(graph).toContain('channel_layouts=stereo,volume=0.5,atrim=duration=2');
+  });
   it('rejects an invalid source trim range', () => {
     const bad: AudioTrackInput[] = [
       { filename: 'bg.mp3', inputIndex: 1, startTime: 0, endTime: 4, sourceTrimStart: 5, sourceTrimEnd: 5, volume: 1, fadeIn: 0, fadeOut: 0 },

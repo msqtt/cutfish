@@ -403,6 +403,7 @@ export function buildFFmpegCommandExtended(
   audioTrackReplaceOriginal: boolean = false,
 ): string[] {
   if (clips.length === 0) throw new Error('At least one clip is required');
+  const masterGain = Math.max(0, safeNumber(masterVolume, 'masterVolume') / 100);
 
   // Compute canvas dimensions based on aspect
   const canvas = computeCanvasDimensions(canvasAspect, profile.height === 1080 ? '1080p' : profile.height === 720 ? '720p' : '480p');
@@ -629,7 +630,7 @@ export function buildFFmpegCommandExtended(
     if (bgFadeOut > 0) {
       bgAudioChain += `,afade=t=out:st=${formatFilterNumber(outputDuration - bgFadeOut)}:d=${formatFilterNumber(bgFadeOut)}`;
     }
-    bgAudioChain += `,volume=${bgVolNorm}[bgaudio]`;
+    bgAudioChain += `,volume=${formatFilterNumber(bgVolNorm * masterGain)}[bgaudio]`;
 
     if (replaceOriginalAudio) {
       filterComplex += bgAudioChain;
@@ -659,7 +660,7 @@ export function buildFFmpegCommandExtended(
 
       let chain = `[${inputIdx}:a]atrim=start=${formatFilterNumber(trimStart)}:end=${formatFilterNumber(trimEnd)},asetpts=PTS-STARTPTS`;
       chain += `,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo`;
-      chain += `,volume=${formatFilterNumber(volNorm)}`;
+      chain += `,volume=${formatFilterNumber(volNorm * masterGain)}`;
 
       const segFadeIn = Math.min(Math.max(0, safeNumber(track.fadeIn, 'fadeIn')), segDuration);
       const segFadeOut = Math.min(Math.max(0, safeNumber(track.fadeOut, 'fadeOut')), segDuration);
@@ -711,7 +712,7 @@ export function buildFFmpegCommandExtended(
       }
 
       // Volume
-      chain += `,volume=${formatFilterNumber(tts.volume)}`;
+      chain += `,volume=${formatFilterNumber(tts.volume * masterGain)}`;
 
       // Limit duration to visible cue duration
       chain += `,atrim=duration=${formatFilterNumber(duration)}`;

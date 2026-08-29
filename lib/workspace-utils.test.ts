@@ -42,6 +42,7 @@ describe('timeline track visibility', () => {
       hasVideo: true,
       hasBackgroundAudio: false,
       hasSubtitles: false,
+      hasTts: false,
       hasImages: false,
       hasEffects: false,
     })).toEqual(['video', 'source-audio']);
@@ -67,3 +68,14 @@ describe('timeline track visibility', () => {
     })).toEqual([]);
   });
 });
+
+  it('adds a dynamic TTS audio track for enabled narration cues', () => {
+    expect(resolveVisibleTimelineTracks({
+      hasVideo: true,
+      hasBackgroundAudio: false,
+      hasSubtitles: true,
+      hasTts: true,
+      hasImages: false,
+      hasEffects: false,
+    })).toEqual(['video', 'source-audio', 'tts-audio', 'subtitle']);
+  });
