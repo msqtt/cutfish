@@ -16,7 +16,7 @@
 - **文字叠加**：字体、大小、颜色、位置、时间——实时预览与 FFmpeg 导出（内置 DejaVu Sans、Serif 与 Sans Mono 字体，写入 MEMFS）
 - **字幕**：多行文本（手动换行 + 按 cue.width 自动按词/字符换行）、位置 x/y、宽度、字体/字号/行高、颜色/可透明背景（带清除按钮）、对齐、旋转、起止时间（数值钳制且 end>start）；按当前项目帧时间插入；导出时渲染为全画布透明 PNG（OffscreenCanvas，加载 DejaVu 字体 fail-fast），通过 FFmpeg overlay 滤镜烧录（shortest=1/eof_action=pass）
 - **浏览器 TTS 预览**：逐字幕启用，语音/语言选择，语速/音调/音量；播放进入 cue 自动朗读（空文本不读），离开 cue/暂停/切项目/卸载时 cancel；检测 speechSynthesis + SpeechSynthesisUtterance，不支持时禁用即时自动预览并显示提示；浏览器 speechSynthesis 仅用于时间轴即时预览
-- **可导出的本地 TTS**：逐字幕选择导出音色（Piper VITS 中文/英文，20–65 MB 模型），包含导出开关（默认开启），语速/音量控制；模型首次使用从外部 CDN 下载后缓存在浏览器 OPFS，所有推理完全本地运行；试听按钮播放实际生成 WAV（与导出一致）；生成语音通过 FFmpeg amix 烧录进最终音轨；字幕文本和媒体永远不会被上传
+- **可导出的本地 TTS**：逐字幕选择导出音色（Piper VITS 中文/英文，20–65 MB 模型），包含导出开关（默认开启），语速/音量控制；模型通过同源镜像代理下载并校验，失败时回退到配置源/官方源，损坏的 OPFS 缓存会自动修复，所有推理完全本地运行；试听播放实际生成 WAV（与导出一致）；生成语音通过 FFmpeg amix 烧录进最终音轨；字幕文本和媒体永远不会被上传
 - **视觉标注**（画笔、矩形、图片）：画笔在预览上自由绘制并实时显示草稿线条；矩形工具拖拽绘制并实时虚线预览；图片导入在当前帧时间插入；支持 x/y、宽高、旋转、不透明度、时间范围（钳制 end>start）、描边/填充/线宽；绘制模式 touch-action:none，处理 pointercancel/lostpointercapture 防止卡住；画笔坐标使用 rebaseDrawingPoints 转为 bounds 内局部 0..1 坐标，预览/导出一致
 - **透明 PNG 渲染器**：字幕 + 视觉标注均通过 `selectAndShiftOverlaysForExport` 裁剪导出范围，渲染为全分辨率 PNG，写入 MEMFS 传递给 `buildFFmpegCommandExtended`，overlay 链使用 `shortest=1:eof_action=pass`；字体/图片加载失败 fail-fast；导出后清理临时文件
 - **图片标注持久化**：File 存入 IndexedDB（结构化克隆），url 仅运行时（加载项目时从 File 重建）；删除不立即 revoke（保留 undo）；项目切换/teardown 统一撤销所有 tracked URL
@@ -104,7 +104,7 @@ lib/i18n.ts                – 中英文翻译资源
 
 字幕渲染为透明 PNG（非 drawtext），支持手动换行、自动按词/字符换行（基于 cue.width）、fontFamily、fontSize、lineHeight、color、可透明背景、align、position、rotation。视觉标注（画笔/矩形/图片）同样渲染为 PNG。所有 PNG overlay 使用 `shortest=1:eof_action=pass` 确保主视频结束时正确终止。
 
-TTS 音频使用 Piper ONNX（通过 `@diffusionstudio/vits-web`）在本地生成。语音模型（20–65 MB）首次使用时从公共 CDN 下载，随后缓存在浏览器 Origin Private File System 中。所有推理完全在浏览器内完成。字幕文本和媒体永远不会被上传。
+TTS 音频使用 Piper ONNX（通过 `@diffusionstudio/vits-web`）在本地生成。语音模型（20–65 MB）通过带校验和回退的同源镜像获取，随后缓存在浏览器 Origin Private File System 中；损坏条目会自动修复。所有推理完全在浏览器内完成。字幕文本和媒体永远不会被上传。
 
 ## 许可证
 

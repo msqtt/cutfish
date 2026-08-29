@@ -1861,7 +1861,8 @@ export default function Editor() {
       setLocalTtsCueId(null);
       setLocalTtsProgress(0);
       setTtsPlaying(false);
-      setToast({ kind: 'error', message: t('tts_generation_failed') });
+      const modelDownloadFailed = error instanceof Error && error.name === 'TtsModelDownloadError';
+      setToast({ kind: 'error', message: t(modelDownloadFailed ? 'tts_model_download_failed' : 'tts_generation_failed') });
     }
   }, [synthesizeLocalTts, ttsSupported, t]);
 

@@ -13,6 +13,12 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
+  async rewrites() {
+    return [{
+      source: '/tts-models/:path*',
+      destination: 'https://hf-mirror.com/api/resolve-cache/models/diffusionstudio/piper-voices/840e38a7e26d813bd6221b78cfbaefa3585b3f71/:path*',
+    }];
+  },
   typescript: { ignoreBuildErrors: false },
   async headers() {
     return [{ source: '/(.*)', headers: securityHeaders }];

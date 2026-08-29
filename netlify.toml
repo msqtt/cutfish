@@ -6,6 +6,12 @@
   NODE_VERSION = "22"
   NEXT_TELEMETRY_DISABLED = "1"
 
+
+[[redirects]]
+  from = "/tts-models/*"
+  to = "https://hf-mirror.com/api/resolve-cache/models/diffusionstudio/piper-voices/840e38a7e26d813bd6221b78cfbaefa3585b3f71/:splat"
+  status = 200
+  force = true
 [[headers]]
   for = "/*"
   [headers.values]
