@@ -43,6 +43,11 @@ function joinBase(base: string, path: string): string {
   return `${base.replace(/\/+$/, '')}/${path}`;
 }
 
+export function isCuratedModelAssetPath(path: string): boolean {
+  if (!path || path.includes('..') || path.startsWith('/')) return false;
+  return Object.values(VOICE_MODEL_PATHS).some((modelPath) => path === modelPath || path === `${modelPath}.json`);
+}
+
 export function getModelAssetCandidates(
   voiceId: LocalTtsVoiceId,
   kind: TtsModelAssetKind,

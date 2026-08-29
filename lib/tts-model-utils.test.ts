@@ -3,6 +3,7 @@ import {
   fetchFirstValidModelAsset,
   getModelAssetCandidates,
   getVoiceModelPath,
+  isCuratedModelAssetPath,
   validateModelAsset,
 } from './tts-model-utils';
 
@@ -60,5 +61,14 @@ describe('TTS model source fallback', () => {
     expect(result.sourceUrl).toBe('https://fallback.test/model.onnx');
     expect(result.blob.size).toBe(validBytes.length);
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('TTS model proxy allowlist', () => {
+  it('allows only curated ONNX/config assets', () => {
+    expect(isCuratedModelAssetPath('zh/zh_CN/huayan/x_low/zh_CN-huayan-x_low.onnx')).toBe(true);
+    expect(isCuratedModelAssetPath('zh/zh_CN/huayan/x_low/zh_CN-huayan-x_low.onnx.json')).toBe(true);
+    expect(isCuratedModelAssetPath('other/private-file')).toBe(false);
+    expect(isCuratedModelAssetPath('../voices.json')).toBe(false);
   });
 });

@@ -8,7 +8,7 @@
 
 - `lib/tts-model-utils.ts` owns the curated voice-to-repository path map, candidate URL construction, streamed fetch retries, and payload validation.
 - `lib/local-tts.ts` owns browser OPFS access. Before inference it validates both `<voice>.onnx` and `<voice>.onnx.json`; missing or corrupt pairs are replaced, with the model written last so partial downloads are never reported as complete.
-- `/tts-models/*` is a same-origin model route. Netlify proxies it to the reachable Hugging Face mirror, avoiding browser CORS/COEP restrictions and networks that cannot reach `huggingface.co`. Next.js rewrites provide the same behavior in local development.
+- `/tts-models/*` is a same-origin, allowlisted model route. It relays the small Piper JSON config, but for ONNX assets it requests only the upstream signed CDN location and redirects the browser there; the 20–65 MB body does not pass through the Netlify function. Mirror and official metadata endpoints are tried in order, avoiding browser CORS/COEP restrictions and networks that cannot reach `huggingface.co` directly.
 - Candidate order is same-origin proxy, optional configured base URL, then official Hugging Face. Every source must return an OK response and a plausible model/config payload.
 - `vits-web.predict()` remains the local inference engine. It reads the validated files from the same `piper` OPFS directory and therefore does not perform its defective downloader path.
 
