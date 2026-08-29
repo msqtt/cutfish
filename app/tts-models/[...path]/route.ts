@@ -1,4 +1,4 @@
-import { isCuratedModelAssetPath } from '@/lib/tts-model-utils';
+import { isCuratedModelAssetPath } from '../../../lib/tts-model-utils';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -35,10 +35,16 @@ export async function GET(
   const failures: string[] = [];
   for (const base of UPSTREAM_BASES) {
     const initialUrl = upstreamUrl(base, path);
+    // The resolve-cache endpoint may retain a signed CDN redirect beyond its
+    // credential expiry. Bust only model metadata requests so every route call
+    // receives a fresh, range-capable CDN URL; config bodies remain cacheable.
+    const requestUrl = isConfig
+      ? initialUrl
+      : `${initialUrl}?download=true&ts=${Date.now()}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      let currentUrl = initialUrl;
+      let currentUrl = requestUrl;
       for (let hop = 0; hop < 6; hop += 1) {
         const response = await fetch(currentUrl, {
           method: 'GET',
