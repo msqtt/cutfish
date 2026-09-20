@@ -53,6 +53,7 @@ import {
 } from '@/lib/visual-overlay-utils';
 import { renderOverlaysToPng } from '@/lib/overlay-renderer';
 import { clampWorkspaceSize, moveTimedRange, resizeWorkspacePanel } from '@/lib/workspace-utils';
+import { getFfmpegCoreAssetUrls } from '@/lib/ffmpeg-runtime';
 import '@/lib/i18n';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1231,11 +1232,12 @@ export default function Editor() {
     instance.on('progress', ({ progress: value }) => setProgress(Math.max(0, Math.min(100, value * 100))));
 
     const loadPromise = (async () => {
-      const baseURL = process.env.NEXT_PUBLIC_FFMPEG_CORE_BASE_URL
-        ?? 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+      const { coreURL, wasmURL } = getFfmpegCoreAssetUrls(
+        process.env.NEXT_PUBLIC_FFMPEG_CORE_BASE_URL,
+      );
       await instance.load({
-        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+        coreURL: await toBlobURL(coreURL, 'text/javascript'),
+        wasmURL: await toBlobURL(wasmURL, 'application/wasm'),
       });
       return instance;
     })();
