@@ -28,7 +28,7 @@ All processing happens locally—your media never leaves your device.
 - **Multi-project management** (create, switch, rename, duplicate, delete) with IndexedDB persistence; force-save before switch/new/delete to prevent stale state
 - **Legacy migration** from v1 single-draft to v2 multi-project format
 - **Content-driven multitrack timeline** — V1 video and A1 source audio are a linked pair: dragging either row with Pointer Events reorders both, with visible handles and Alt+Arrow fallback. A2 background audio, A3 local TTS narration, S1 subtitles, I1 images, and FX effects appear only when material exists. Selection drives contextual Inspector settings, and Cut/Delete act on the selected material at the playhead
-- **Contextual Inspector** — selecting V1, A1, A2, A3/S1, I1, or FX opens the relevant clip, source-audio, segment, subtitle/TTS, overlay, or effect settings; project/global controls remain explicit tabs, and mobile selection opens the bottom sheet
+- **Contextual Inspector** — selecting V1, A1, A2, A3/S1, I1, or FX prioritizes the relevant clip, source-audio, segment, subtitle/TTS, overlay, or effect settings; irrelevant contextual tabs stay hidden, while project/global destinations remain stable. Mobile timeline selection stays uninterrupted and the Inspector opens explicitly from the command bar
 - **Fullscreen preview** (F key or button) with press-and-hold before/after filter comparison
 - **Keyboard shortcuts** with `?` help modal, focus trapping, and initial focus on open
 - **Localized last-saved timestamp** in save status indicator

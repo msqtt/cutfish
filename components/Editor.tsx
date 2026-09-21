@@ -1,17 +1,18 @@
 'use client';
 
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import {
   ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Edit2,
-  FileVideo, HelpCircle, Maximize, Menu, Minimize, MonitorPlay, Moon,
-  Music, Pause, Play, Plus, Redo2, RotateCcw, RotateCw, Scissors, SlidersHorizontal,
+  FileVideo, Globe, HelpCircle, Maximize, Menu, Minimize, MonitorPlay, Moon,
+  MoreVertical, Music, Pause, Play, Plus, Redo2, RotateCcw, RotateCw, Scissors, SlidersHorizontal,
   Sun, Trash2, Undo2, Upload, Volume2, VolumeX, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { useTranslation } from 'react-i18next';
 import ExportPanel from '@/components/ExportPanel';
+import RangeControl from '@/components/RangeControl';
 import Timeline, { type TimelineTimedItem, type TimelineTimedTrack } from '@/components/Timeline';
 import {
   buildFFmpegCommandExtended, resolveExportProfile,
@@ -30,7 +31,7 @@ import {
 } from '@/lib/editor-utils';
 import { useHistory } from '@/lib/history';
 import {
-  backgroundAudioGainAtTime, inspectorTabForSelection, splitClipWithTransition,
+  backgroundAudioGainAtTime, inspectorTabForSelection, resolveInspectorTabs, splitClipWithTransition,
   type EditorSelection,
 } from '@/lib/editor-workflow';
 import {
@@ -52,7 +53,7 @@ import {
   rebaseDrawingPoints, getActiveTtsCue, computeOverlayCssTransform,
 } from '@/lib/visual-overlay-utils';
 import { renderOverlaysToPng } from '@/lib/overlay-renderer';
-import { clampWorkspaceSize, moveTimedRange, resizeWorkspacePanel } from '@/lib/workspace-utils';
+import { clampWorkspaceSize, formatEditorTime, moveTimedRange, resizeWorkspacePanel, stepTimelineZoom } from '@/lib/workspace-utils';
 import { getFfmpegCoreAssetUrls } from '@/lib/ffmpeg-runtime';
 import '@/lib/i18n';
 
@@ -95,7 +96,6 @@ export interface EditorState {
 }
 
 type InspectorTab = 'clip' | 'project' | 'audio' | 'effects' | 'subtitles';
-const INSPECTOR_TABS: InspectorTab[] = ['clip', 'project', 'audio', 'effects', 'subtitles'];
 type MobilePanel = 'media' | 'inspector' | null;
 type WorkspacePanel = 'media' | 'inspector' | 'timeline';
 type Toast = { kind: 'success' | 'error'; message: string } | null;
@@ -116,58 +116,6 @@ const DEFAULT_STATE: EditorState = {
   subtitles: [], visualOverlays: [],
 };
 const iconButton = 'inline-flex min-h-9 min-w-9 items-center justify-center rounded-md p-2 text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-30';
-
-// ─── RangeControl ────────────────────────────────────────────────────────────
-
-interface RangeControlProps {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step?: number;
-  unit?: string;
-  disabled?: boolean;
-  onChange: (value: number) => void;
-  onEditStart: () => void;
-  onEditEnd: () => void;
-}
-
-function RangeControl({
-  label, value, min, max, step = 1, unit = '%', disabled,
-  onChange, onEditStart, onEditEnd,
-}: RangeControlProps) {
-  const id = useId();
-  const digits = step < 0.1 ? 2 : step < 1 ? 1 : 0;
-  const updateValue = (next: number) => {
-    if (Number.isFinite(next)) onChange(Math.max(min, Math.min(max, next)));
-  };
-  return (
-    <div className="flex flex-col gap-1.5 text-xs text-[var(--muted)]">
-      <div className="flex items-center justify-between gap-3">
-        <label htmlFor={`${id}-range`}>{label}</label>
-        <div className="flex items-center gap-1">
-          <label htmlFor={`${id}-number`} className="sr-only">{label}</label>
-          <input
-            id={`${id}-number`} type="number" min={min} max={max} step={step}
-            value={Number(value.toFixed(digits))} disabled={disabled} aria-label={`${label} (${unit})`}
-            onFocus={onEditStart}
-            onChange={(event) => updateValue(event.currentTarget.valueAsNumber)}
-            onKeyDown={(event) => { onEditStart(); if (event.key === 'Enter') event.currentTarget.blur(); }}
-            onBlur={onEditEnd}
-            className="w-20 rounded border border-[var(--border)] bg-[var(--raised)] px-1.5 py-1 text-right font-mono text-xs text-[var(--text)] disabled:opacity-40"
-          />
-          <span className="min-w-4 text-xs">{unit}</span>
-        </div>
-      </div>
-      <input
-        id={`${id}-range`} type="range" aria-label={label} min={min} max={max} step={step} value={value} disabled={disabled}
-        onPointerDown={onEditStart} onPointerUp={onEditEnd} onPointerCancel={onEditEnd} onKeyDown={onEditStart}
-        onKeyUp={onEditEnd} onBlur={onEditEnd} onChange={(event) => updateValue(Number(event.target.value))}
-        className="h-5 w-full touch-pan-y cursor-pointer appearance-none rounded-full accent-indigo-600 disabled:cursor-not-allowed disabled:opacity-40"
-      />
-    </div>
-  );
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -329,7 +277,7 @@ export default function Editor() {
   const [timelineHeight, setTimelineHeight] = useState(300);
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
-  const [maximizedPanel, setMaximizedPanel] = useState<WorkspacePanel | null>(null);
+  const [overflowMenuOpen, setOverflowMenuOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [showProjectManager, setShowProjectManager] = useState(false);
@@ -371,9 +319,18 @@ export default function Editor() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const exportDialogRef = useRef<HTMLDivElement>(null);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
+  const helpTriggerRef = useRef<HTMLButtonElement>(null);
+  const projectTriggerRef = useRef<HTMLButtonElement>(null);
+  const overflowMenuRef = useRef<HTMLDivElement>(null);
+  const overflowTriggerRef = useRef<HTMLButtonElement>(null);
   const previewCanvasRef = useRef<HTMLDivElement>(null);
   const helpDialogRef = useRef<HTMLDivElement>(null);
   const projectDialogRef = useRef<HTMLDivElement>(null);
+  const mediaSheetRef = useRef<HTMLElement>(null);
+  const inspectorSheetRef = useRef<HTMLElement>(null);
+  const mediaTriggerRef = useRef<HTMLButtonElement>(null);
+  const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
+  const refreshProjectsRef = useRef<(() => Promise<void>) | null>(null);
   const objectUrlsRef = useRef(new Set<string>());
   const continuousEditRef = useRef<EditorState | null>(null);
   const ffmpegRef = useRef<FFmpeg | null>(null);
@@ -464,6 +421,15 @@ export default function Editor() {
       : selection?.kind === 'effect'
         ? { track: 'effect' as const, id: selection.id }
         : null;
+
+  // Contextual Inspector destinations: selected material first, then the stable
+  // global destinations, capped at four (derived, never persisted).
+  const visibleInspectorTabs = resolveInspectorTabs(selection) as InspectorTab[];
+  // The active tab must always be one of the visible destinations; fall back to
+  // the contextual first tab when a stale selection removed the current one.
+  const effectiveInspectorTab: InspectorTab = visibleInspectorTabs.includes(inspectorTab)
+    ? inspectorTab
+    : visibleInspectorTabs[0];
 
   const createTrackedUrl = useCallback((file: Blob) => {
     const url = URL.createObjectURL(file);
@@ -591,7 +557,6 @@ export default function Editor() {
 
 
   const startWorkspaceResize = useCallback((event: React.PointerEvent<HTMLElement>, panel: WorkspacePanel) => {
-    if (maximizedPanel) return;
     event.preventDefault();
     const startX = event.clientX;
     const startY = event.clientY;
@@ -613,7 +578,7 @@ export default function Editor() {
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
-  }, [leftPanelWidth, maximizedPanel, rightPanelWidth, timelineHeight]);
+  }, [leftPanelWidth, rightPanelWidth, timelineHeight]);
 
   const resizeWorkspaceFromKeyboard = useCallback((panel: WorkspacePanel, delta: number) => {
     if (panel === 'media') setLeftPanelWidth((size) => clampWorkspaceSize(size + delta, 180, Math.min(640, window.innerWidth - 420)));
@@ -624,10 +589,9 @@ export default function Editor() {
   const selectEditorItem = useCallback((next: EditorSelection, subtitleTrack: 'tts' | 'subtitle' = 'subtitle') => {
     setSelection(next);
     setInspectorTab(inspectorTabForSelection(next));
-    if (next) {
-      setRightPanelCollapsed(false);
-      if (typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches) setMobilePanel('inspector');
-    }
+    // Selection is arrangement, not editing: desktop expands a collapsed Inspector
+    // so context is visible, but the mobile sheet only opens on an explicit request.
+    if (next) setRightPanelCollapsed(false);
     setSelectedAudioSegmentId(next?.kind === 'background-audio' ? next.id : null);
     setEditingSubtitleId(next?.kind === 'subtitle' ? next.id : null);
     if (next?.kind === 'subtitle') setSelectedSubtitleTrack(subtitleTrack);
@@ -756,7 +720,10 @@ export default function Editor() {
         kind: 'success',
         message: t('import_complete', { imported: validClips.length, skipped, failed }),
       });
-      setMobilePanel(null);
+      setMobilePanel((current) => {
+        if (current === 'media') window.requestAnimationFrame(() => mediaTriggerRef.current?.focus());
+        return null;
+      });
     } finally {
       importingRef.current = false;
       setImportProgress(null);
@@ -1473,6 +1440,7 @@ export default function Editor() {
       }
       setProcessing(false);
       setProgress(0);
+      window.requestAnimationFrame(() => exportTriggerRef.current?.focus());
     }
   }, [ensureFfmpeg, processing, projectDurationSpeedAware, state, t]);
 
@@ -1492,12 +1460,42 @@ export default function Editor() {
     window.requestAnimationFrame(() => exportTriggerRef.current?.focus());
   }, []);
 
-  const trapFocus = useCallback((event: React.KeyboardEvent<HTMLDivElement>, ref: React.RefObject<HTMLDivElement | null>) => {
+  const openHelpModal = useCallback(() => { setOverflowMenuOpen(false); setMobilePanel(null); setShowHelpModal(true); }, []);
+  const closeHelpModal = useCallback(() => {
+    setShowHelpModal(false);
+    window.requestAnimationFrame(() => (helpTriggerRef.current ?? overflowTriggerRef.current)?.focus());
+  }, []);
+  const openProjectManager = useCallback(() => {
+    setOverflowMenuOpen(false); setMobilePanel(null);
+    void refreshProjectsRef.current?.();
+    setShowProjectManager(true);
+  }, []);
+  const closeProjectManager = useCallback(() => {
+    setShowProjectManager(false);
+    window.requestAnimationFrame(() => (projectTriggerRef.current ?? overflowTriggerRef.current)?.focus());
+  }, []);
+
+  const openMobilePanel = useCallback((panel: 'media' | 'inspector') => {
+    setOverflowMenuOpen(false);
+    setMobilePanel(panel);
+  }, []);
+  const closeMobilePanel = useCallback(() => {
+    setMobilePanel((current) => {
+      const trigger = current === 'media' ? mediaTriggerRef.current : current === 'inspector' ? inspectorTriggerRef.current : null;
+      if (trigger) window.requestAnimationFrame(() => trigger.focus());
+      return null;
+    });
+  }, []);
+
+  const trapFocus = useCallback((event: React.KeyboardEvent<HTMLElement>, ref: React.RefObject<HTMLElement | null>) => {
     if (event.key !== 'Tab') return;
-    const focusable = ref.current?.querySelectorAll<HTMLElement>(
+    const candidates = ref.current?.querySelectorAll<HTMLElement>(
       'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
     );
-    if (!focusable?.length) return;
+    const focusable = candidates
+      ? Array.from(candidates).filter((element) => element.getClientRects().length > 0)
+      : [];
+    if (!focusable.length) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
     if (document.activeElement === ref.current) {
@@ -1532,12 +1530,32 @@ export default function Editor() {
     return () => window.cancelAnimationFrame(frame);
   }, [showProjectManager]);
 
+  // Mobile sheets act as dialogs: move focus into the sheet when it opens.
+  useEffect(() => {
+    if (!mobilePanel) return;
+    const sheet = mobilePanel === 'media' ? mediaSheetRef.current : inspectorSheetRef.current;
+    if (!sheet) return;
+    const frame = window.requestAnimationFrame(() => sheet.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [mobilePanel]);
+
+  // Overflow menu dismisses on outside pointer down.
+  useEffect(() => {
+    if (!overflowMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!overflowMenuRef.current?.contains(event.target as Node)) setOverflowMenuOpen(false);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [overflowMenuOpen]);
+
   // ─── Project Manager ─────────────────────────────────────────────────────
 
   const refreshProjects = useCallback(async () => {
     const all = await listDrafts();
     setProjects(all);
   }, []);
+  useEffect(() => { refreshProjectsRef.current = refreshProjects; }, [refreshProjects]);
 
   // H2/H3: Force-save current project state to avoid stale data races
   const forceSaveCurrentProject = useCallback(async () => {
@@ -1570,7 +1588,8 @@ export default function Editor() {
     setProjectNameInput('');
     await refreshProjects();
     setToast({ kind: 'success', message: t('project_created') });
-  }, [forceSaveCurrentProject, projectNameInput, refreshProjects, reset, selectEditorItem, t]);
+    closeProjectManager();
+  }, [closeProjectManager, forceSaveCurrentProject, projectNameInput, refreshProjects, reset, selectEditorItem, t]);
 
   const handleSwitchProject = useCallback(async (id: string) => {
     if (id === currentProjectId) return;
@@ -1584,8 +1603,8 @@ export default function Editor() {
     reset(editorState);
     selectEditorItem(null);
     setToast({ kind: 'success', message: t('project_switched') });
-    setShowProjectManager(false);
-  }, [createTrackedUrl, currentProjectId, forceSaveCurrentProject, reset, selectEditorItem, t]);
+    closeProjectManager();
+  }, [closeProjectManager, createTrackedUrl, currentProjectId, forceSaveCurrentProject, reset, selectEditorItem, t]);
 
   const handleRenameProject = useCallback(async (id: string, newName: string) => {
     if (!newName.trim()) return;
@@ -1672,10 +1691,11 @@ export default function Editor() {
       const editing = target?.matches('input, textarea, select, button, summary, [role="slider"], [contenteditable="true"]');
 
       if (event.code === 'Escape') {
-        if (showHelpModal) { event.preventDefault(); setShowHelpModal(false); return; }
-        if (showProjectManager) { event.preventDefault(); setShowProjectManager(false); return; }
+        if (showHelpModal) { event.preventDefault(); closeHelpModal(); return; }
+        if (showProjectManager) { event.preventDefault(); closeProjectManager(); return; }
         if (exportModalOpen) { event.preventDefault(); closeExportModal(); return; }
-        if (mobilePanel) { event.preventDefault(); setMobilePanel(null); return; }
+        if (overflowMenuOpen) { event.preventDefault(); setOverflowMenuOpen(false); window.requestAnimationFrame(() => overflowTriggerRef.current?.focus()); return; }
+        if (mobilePanel) { event.preventDefault(); closeMobilePanel(); return; }
         if (overlayTool !== 'select') {
           event.preventDefault();
           drawingRef.current = { points: [], active: false };
@@ -1700,7 +1720,7 @@ export default function Editor() {
       }
       if (editing) return;
 
-      if (event.key === '?') { event.preventDefault(); setShowHelpModal(true); return; }
+      if (event.key === '?') { event.preventDefault(); openHelpModal(); return; }
       if (event.code === 'Space') { event.preventDefault(); togglePlay(); }
       if (!event.ctrlKey && !event.metaKey && event.code === 'KeyS') { event.preventDefault(); splitAtPlayhead(); }
       if (!event.ctrlKey && !event.metaKey && event.code === 'KeyF') { event.preventDefault(); toggleFullscreen(); }
@@ -1724,7 +1744,7 @@ export default function Editor() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeClip, closeExportModal, deleteSelectedMaterial, exportModalOpen, handleExport, mobilePanel, overlayTool, redo, removeClip, seek, showHelpModal, showProjectManager, splitAtPlayhead, toggleFullscreen, togglePlay, undo, updateState]);
+  }, [activeClip, closeExportModal, closeHelpModal, closeMobilePanel, closeProjectManager, deleteSelectedMaterial, exportModalOpen, handleExport, mobilePanel, openHelpModal, overflowMenuOpen, overlayTool, redo, removeClip, seek, showHelpModal, showProjectManager, splitAtPlayhead, toggleFullscreen, togglePlay, undo, updateState]);
 
   // ─── State Updaters ──────────────────────────────────────────────────────
 
@@ -2159,13 +2179,13 @@ export default function Editor() {
       <input ref={fileInputRef} type="file" accept="video/*,audio/*,image/*" multiple className="sr-only" onChange={(event) => { void importMediaFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
       <input ref={imageInputRef} type="file" accept="image/*" className="sr-only" onChange={(event) => { const f = event.target.files?.[0]; if (f) importImageOverlay(f); event.target.value = ''; }} aria-label={t('add_image')} />
 
-      {/* ─── Header ──────────────────────────────────────────────────────── */}
+      {/* ─── Header: canonical global command bar ─────────────────────────── */}
       <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--panel)] px-3 sm:px-4">
         <div className="flex min-w-0 items-center gap-2 sm:gap-4">
           <div className="flex min-w-0 items-center gap-2 font-semibold">
-            <MonitorPlay className="h-5 w-5 shrink-0 text-indigo-500" aria-hidden="true" />
-            <h1 className="truncate text-sm">{t('app_title')}</h1>
-            <span className="hidden rounded border border-indigo-500/30 px-1.5 py-0.5 text-xs font-medium text-indigo-500 sm:inline">{t('wasm_powered')}</span>
+            <MonitorPlay className="h-5 w-5 shrink-0 text-[var(--accent)]" aria-hidden="true" />
+            <h1 className="max-[379px]:sr-only truncate text-sm">{t('app_title')}</h1>
+            <span className="hidden rounded border border-[var(--accent)]/30 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)] sm:inline">{t('wasm_powered')}</span>
           </div>
           <div className="flex items-center border-l border-[var(--border)] pl-2 sm:pl-4">
             <button onClick={undo} disabled={!canUndo} className={iconButton} aria-label={`${t('undo')} (Ctrl+Z)`} title={`${t('undo')} (Ctrl+Z)`}><Undo2 className="h-4 w-4" /></button>
@@ -2178,35 +2198,56 @@ export default function Editor() {
             <span className={`h-2 w-2 rounded-full ${saveStatus === 'error' ? 'bg-red-500' : saveStatus === 'saving' ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`} />
             {saveStatus === 'saving' ? t('saving') : saveStatus === 'error' ? t('save_error') : lastSavedTime ? t('last_saved', { time: new Date(lastSavedTime).toLocaleTimeString(i18n.resolvedLanguage?.startsWith('zh') ? 'zh-CN' : 'en', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }) : t('auto_save')}
           </span>
-          <button onClick={() => { void refreshProjects(); setShowProjectManager(true); }} className={`${iconButton} hidden sm:inline-flex`} aria-label={t('projects')} title={t('projects')}><Menu className="h-4 w-4" /></button>
-          <button onClick={() => setShowHelpModal(true)} className={`${iconButton} hidden sm:inline-flex`} aria-label={t('keyboard_shortcuts')} title={t('shortcut_help')}><HelpCircle className="h-4 w-4" /></button>
-          <button onClick={() => setMobilePanel('media')} className={`${iconButton} lg:hidden`} aria-label={t('media_assets')}><FileVideo className="h-4 w-4" /></button>
-          <button onClick={() => setMobilePanel('inspector')} className={`${iconButton} lg:hidden`} aria-label={t('inspector')}><SlidersHorizontal className="h-4 w-4" /></button>
-          <button onClick={() => void i18n.changeLanguage(i18n.resolvedLanguage?.startsWith('zh') ? 'en' : 'zh')} className="rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs hover:bg-[var(--raised)]" aria-label={t('language')}>{i18n.resolvedLanguage?.startsWith('zh') ? 'EN' : '中文'}</button>
-          <button onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')} className={iconButton} aria-label={resolvedTheme === 'dark' ? t('light_mode') : t('dark_mode')}>{resolvedTheme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}</button>
+          {/* Desktop import (Inspector is no longer required to import) */}
+          <button onClick={() => fileInputRef.current?.click()} disabled={Boolean(importProgress)} className="hidden items-center gap-1.5 rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40 lg:inline-flex" aria-label={t('import')} title={t('import')}><Upload className="h-3.5 w-3.5" aria-hidden="true" />{t('import')}</button>
+          {/* Mobile-only Media / Inspector sheet toggles */}
+          <button ref={mediaTriggerRef} onClick={() => openMobilePanel('media')} className={`${iconButton} lg:hidden`} aria-label={t('media_assets')} aria-haspopup="dialog" aria-expanded={mobilePanel === 'media'}><FileVideo className="h-4 w-4" /></button>
+          <button ref={inspectorTriggerRef} onClick={() => openMobilePanel('inspector')} className={`${iconButton} lg:hidden`} aria-label={t('inspector')} aria-haspopup="dialog" aria-expanded={mobilePanel === 'inspector'}><SlidersHorizontal className="h-4 w-4" /></button>
+          {/* Always-visible canonical Export entry point */}
+          <button
+            ref={exportTriggerRef} type="button" onClick={() => { setOverflowMenuOpen(false); setExportModalOpen(true); }} disabled={processing || !state.clips.length}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm"
+            aria-label={t('open_export_settings')} title={t('open_export_settings')}
+          ><Download className="h-4 w-4" aria-hidden="true" /><span className="hidden sm:inline">{t('export')}</span></button>
+          {/* Single overflow: Projects, Help, Language, Theme */}
+          <div className="relative" ref={overflowMenuRef}>
+            <button
+              ref={overflowTriggerRef} type="button" onClick={() => setOverflowMenuOpen((open) => !open)}
+              className={iconButton} aria-label={t('more_actions')} title={t('more_actions')}
+              aria-expanded={overflowMenuOpen} aria-controls="global-command-menu"
+            ><MoreVertical className="h-4 w-4" /></button>
+            {overflowMenuOpen && (
+              <div id="global-command-menu" className="absolute right-0 top-full z-50 mt-1 w-52 overflow-hidden rounded-md border border-[var(--border)] bg-[var(--panel)] py-1 shadow-xl">
+                <button ref={projectTriggerRef} onClick={openProjectManager} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--raised)]"><Menu className="h-4 w-4 shrink-0" aria-hidden="true" />{t('projects')}</button>
+                <button ref={helpTriggerRef} onClick={openHelpModal} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--raised)]"><HelpCircle className="h-4 w-4 shrink-0" aria-hidden="true" />{t('keyboard_shortcuts')}</button>
+                <button onClick={() => { void i18n.changeLanguage(i18n.resolvedLanguage?.startsWith('zh') ? 'en' : 'zh'); setOverflowMenuOpen(false); }} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--raised)]"><Globe className="h-4 w-4 shrink-0" aria-hidden="true" />{t('language')}<span className="ml-auto font-mono text-[var(--muted)]">{i18n.resolvedLanguage?.startsWith('zh') ? 'EN' : '中文'}</span></button>
+                <button onClick={() => { setTheme(resolvedTheme === 'dark' ? 'light' : 'dark'); setOverflowMenuOpen(false); }} className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-[var(--raised)]">{resolvedTheme === 'dark' ? <Sun className="h-4 w-4 shrink-0" aria-hidden="true" /> : <Moon className="h-4 w-4 shrink-0" aria-hidden="true" />}{resolvedTheme === 'dark' ? t('light_mode') : t('dark_mode')}</button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
       {/* ─── Main Area ───────────────────────────────────────────────────── */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        {mobilePanel && <button className="absolute inset-0 z-20 bg-black/50 transition active:bg-black/60 lg:hidden" onClick={() => setMobilePanel(null)} aria-label={t('close')} />}
+        {mobilePanel && <button className="absolute inset-0 z-20 bg-black/50 transition active:bg-black/60 lg:hidden" onClick={closeMobilePanel} aria-label={t('close')} />}
 
         {/* ─── Media Panel (Left) ──────────────────────────────────────── */}
         <aside
-          data-maximized={maximizedPanel === 'media'}
-          className={`workspace-side-panel absolute inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)] transition-[transform,width] lg:static lg:w-[var(--media-panel-width)] lg:translate-x-0 ${maximizedPanel === 'media' ? 'lg:fixed lg:inset-0 lg:z-50' : ''} ${mobilePanel === 'media' ? 'translate-x-0' : '-translate-x-full'}`}
-          style={{ '--media-panel-width': maximizedPanel === 'media' ? '100vw' : `${leftPanelCollapsed ? 48 : leftPanelWidth}px` } as React.CSSProperties}
+          ref={mediaSheetRef}
+          tabIndex={mobilePanel === 'media' ? -1 : undefined}
+          onKeyDown={mobilePanel === 'media' ? (event) => trapFocus(event, mediaSheetRef) : undefined}
+          role={mobilePanel === 'media' ? 'dialog' : undefined} aria-modal={mobilePanel === 'media' ? true : undefined}
+          className={`workspace-side-panel absolute inset-y-0 left-0 z-30 flex w-72 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--panel)] transition-[transform,width,visibility] lg:static lg:w-[var(--media-panel-width)] lg:translate-x-0 lg:visible ${mobilePanel === 'media' ? 'visible translate-x-0' : 'invisible -translate-x-full'}`}
+          style={{ '--media-panel-width': `${leftPanelCollapsed ? 48 : leftPanelWidth}px` } as React.CSSProperties}
           aria-label={t('media_assets')}
         >
           <div className={`flex h-11 items-center justify-between border-b border-[var(--border)] ${leftPanelCollapsed ? 'lg:px-1' : 'px-3'}`}>
             <span className={`text-xs font-bold uppercase tracking-widest text-[var(--muted)] ${leftPanelCollapsed ? 'lg:hidden' : ''}`}>{t('media_assets')}</span>
             <div className="flex items-center gap-1">
-              {maximizedPanel !== 'media' && <button type="button" onClick={() => setLeftPanelCollapsed((value) => !value)} className={`${iconButton} hidden lg:inline-flex`} aria-label={leftPanelCollapsed ? t('expand_panel') : t('collapse_panel')} title={leftPanelCollapsed ? t('expand_panel') : t('collapse_panel')}>{leftPanelCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}</button>}
-              {!leftPanelCollapsed && <button type="button" onClick={() => setMaximizedPanel(maximizedPanel === 'media' ? null : 'media')} className={`${iconButton} hidden lg:inline-flex`} aria-pressed={maximizedPanel === 'media'} aria-label={maximizedPanel === 'media' ? t('restore_panel') : t('maximize_panel')} title={maximizedPanel === 'media' ? t('restore_panel') : t('maximize_panel')}>{maximizedPanel === 'media' ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}</button>}
-              <button onClick={() => { void refreshProjects(); setShowProjectManager(true); setMobilePanel(null); }} className={`${iconButton} sm:hidden`} aria-label={t('projects')} title={t('projects')}><Menu className="h-4 w-4" /></button>
-              <button onClick={() => { setShowHelpModal(true); setMobilePanel(null); }} className={`${iconButton} sm:hidden`} aria-label={t('keyboard_shortcuts')} title={t('shortcut_help')}><HelpCircle className="h-4 w-4" /></button>
-              <button onClick={() => fileInputRef.current?.click()} disabled={Boolean(importProgress)} className={`flex items-center gap-1 rounded ${leftPanelCollapsed ? 'lg:hidden' : ''} px-2 py-1 text-xs text-indigo-500 hover:bg-indigo-500/10 disabled:opacity-40`}><Plus className="h-3.5 w-3.5" />{t('import')}</button>
-              <button onClick={() => setMobilePanel(null)} className={`${iconButton} lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
+              <button type="button" onClick={() => setLeftPanelCollapsed((value) => !value)} className={`${iconButton} hidden lg:inline-flex`} aria-label={leftPanelCollapsed ? t('expand_panel') : t('collapse_panel')} title={leftPanelCollapsed ? t('expand_panel') : t('collapse_panel')}>{leftPanelCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}</button>
+              <button onClick={() => fileInputRef.current?.click()} disabled={Boolean(importProgress)} className={`flex items-center gap-1 rounded ${leftPanelCollapsed ? 'lg:hidden' : ''} px-2 py-1 text-xs text-[var(--accent)] hover:bg-[var(--accent)]/10 disabled:opacity-40`}><Plus className="h-3.5 w-3.5" />{t('import')}</button>
+              <button onClick={closeMobilePanel} className={`${iconButton} lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
             </div>
           </div>
           <div role="list" className={`flex-1 space-y-2 overflow-y-auto p-2 ${leftPanelCollapsed ? 'lg:hidden' : ''}`}>
@@ -2235,12 +2276,12 @@ export default function Editor() {
                 {/* M8: Accessible per-clip disclosure/menu */}
                 <details className="mt-1 border-t border-[var(--border)] pt-1">
                   <summary className={`${iconButton} flex w-full cursor-pointer items-center justify-center gap-1 text-xs`} aria-label={t('more_actions')}><Menu className="h-3.5 w-3.5" /><span className="sr-only sm:not-sr-only">{t('actions')}</span></summary>
-                  <div className="mt-1 flex flex-wrap justify-end gap-0.5" role="menu">
-                    <button role="menuitem" onClick={() => setRenamingClipId(clip.id)} className={iconButton} aria-label={t('rename_clip')} title={t('rename')}><Edit2 className="h-3.5 w-3.5" /></button>
-                    <button role="menuitem" onClick={() => duplicateClipById(clip.id)} className={iconButton} aria-label={`${t('duplicate')} ${clip.displayName}`} title={t('duplicate')}><Copy className="h-3.5 w-3.5" /></button>
-                    <button role="menuitem" onClick={() => moveClip(clip.id, -1)} disabled={index === 0} className={iconButton} aria-label={t('move_left')} title={t('move_left')}><ChevronLeft className="h-3.5 w-3.5" /></button>
-                    <button role="menuitem" onClick={() => moveClip(clip.id, 1)} disabled={index === state.clips.length - 1} className={iconButton} aria-label={t('move_right')} title={t('move_right')}><ChevronRight className="h-3.5 w-3.5" /></button>
-                    <button role="menuitem" onClick={() => removeClip(clip.id)} className={`${iconButton} hover:text-red-500`} aria-label={`${t('delete')} ${clip.displayName}`} title={t('delete')}><Trash2 className="h-3.5 w-3.5" /></button>
+                  <div className="mt-1 flex flex-wrap justify-end gap-0.5">
+                    <button onClick={() => setRenamingClipId(clip.id)} className={iconButton} aria-label={t('rename_clip')} title={t('rename')}><Edit2 className="h-3.5 w-3.5" /></button>
+                    <button onClick={() => duplicateClipById(clip.id)} className={iconButton} aria-label={`${t('duplicate')} ${clip.displayName}`} title={t('duplicate')}><Copy className="h-3.5 w-3.5" /></button>
+                    <button onClick={() => moveClip(clip.id, -1)} disabled={index === 0} className={iconButton} aria-label={t('move_left')} title={t('move_left')}><ChevronLeft className="h-3.5 w-3.5" /></button>
+                    <button onClick={() => moveClip(clip.id, 1)} disabled={index === state.clips.length - 1} className={iconButton} aria-label={t('move_right')} title={t('move_right')}><ChevronRight className="h-3.5 w-3.5" /></button>
+                    <button onClick={() => removeClip(clip.id)} className={`${iconButton} hover:text-red-500`} aria-label={`${t('delete')} ${clip.displayName}`} title={t('delete')}><Trash2 className="h-3.5 w-3.5" /></button>
                   </div>
                 </details>
               </div>
@@ -2265,7 +2306,7 @@ export default function Editor() {
                   className="flex w-full items-center gap-2 text-left"
                 >
                   <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-emerald-500/15"><Music className="h-5 w-5 text-emerald-400" /></span>
-                  <span className="min-w-0 flex-1"><strong className="block truncate text-xs">{state.backgroundMusic.name}</strong><span className="text-[10px] text-[var(--muted)]">A2 · {t('duration', { value: state.backgroundMusic.duration.toFixed(1) })} · {t('drag_to_timeline')}</span></span>
+                  <span className="min-w-0 flex-1"><strong className="block truncate text-xs">{state.backgroundMusic.name}</strong><span className="text-xs text-[var(--muted)]">A2 · {t('duration', { value: state.backgroundMusic.duration.toFixed(1) })} · {t('drag_to_timeline')}</span></span>
                 </button>
                 <div className="mt-2 flex gap-1 border-t border-emerald-600/20 pt-2">
                   <button type="button" onClick={() => addAudioSegment()} disabled={state.backgroundMusic.duration <= 0} className="flex flex-1 items-center justify-center gap-1 rounded border border-[var(--border)] px-2 py-1 text-xs hover:border-emerald-400 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />{t('add_to_timeline')}</button>
@@ -2275,7 +2316,7 @@ export default function Editor() {
             )}
             {!state.clips.length && !state.backgroundMusic && <p className="m-2 rounded-lg border border-dashed border-[var(--border)] p-5 text-center text-xs leading-5 text-[var(--muted)]">{t('no_assets')}</p>}
           </div>
-          {!leftPanelCollapsed && maximizedPanel !== 'media' && <div role="separator" aria-label={t('resize_media_panel')} aria-orientation="vertical" aria-valuemin={180} aria-valuemax={640} aria-valuenow={Math.round(leftPanelWidth)} tabIndex={0} className="absolute inset-y-0 right-0 z-40 hidden w-2 translate-x-1/2 cursor-col-resize touch-none lg:block" onPointerDown={(event) => startWorkspaceResize(event, 'media')} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); resizeWorkspaceFromKeyboard('media', (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 48 : 16)); }} />}
+          {!leftPanelCollapsed && <div role="separator" aria-label={t('resize_media_panel')} aria-orientation="vertical" aria-valuemin={180} aria-valuemax={640} aria-valuenow={Math.round(leftPanelWidth)} tabIndex={0} className="workspace-resizer workspace-resizer-x absolute inset-y-0 right-0 z-40 hidden translate-x-1/2 lg:block" onPointerDown={(event) => startWorkspaceResize(event, 'media')} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); resizeWorkspaceFromKeyboard('media', (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 48 : 16)); }} />}
         </aside>
 
         {/* ─── Preview (Center) ────────────────────────────────────────── */}
@@ -2353,23 +2394,43 @@ export default function Editor() {
                 {state.textOverlays.map((overlay) => {
                   const visible = previewProjectTime >= overlay.startTime && previewProjectTime <= overlay.endTime;
                   if (!visible) return null;
+                  const selectable = overlayTool === 'select';
+                  const selected = editingTextId === overlay.id;
                   return (
-                    <span key={overlay.id} className="pointer-events-none absolute z-20" style={{
-                      left: `${overlay.position.x}%`, top: `${overlay.position.y}%`,
-                      transform: 'translate(-50%,-50%)',
-                      fontSize: `${overlay.fontSize * 0.5}px`,
-                      color: overlay.color,
-                      fontFamily: overlay.fontFamily === 'mono' ? 'monospace' : overlay.fontFamily === 'serif' ? 'serif' : 'sans-serif',
-                      textShadow: '0 2px 4px rgba(0,0,0,0.7)',
-                    }}>{overlay.text}</span>
+                    <span
+                      key={overlay.id}
+                      className={`absolute z-20 ${selectable ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                      role={selectable ? 'button' : undefined}
+                      tabIndex={selectable ? 0 : undefined}
+                      aria-pressed={selectable ? selected : undefined}
+                      aria-label={selectable ? t('select_overlay_named', { name: overlay.text || t('text_overlays') }) : undefined}
+                      style={{
+                        left: `${overlay.position.x}%`, top: `${overlay.position.y}%`,
+                        transform: 'translate(-50%,-50%)',
+                        fontSize: `${overlay.fontSize * 0.5}px`,
+                        color: overlay.color,
+                        fontFamily: overlay.fontFamily === 'mono' ? 'monospace' : overlay.fontFamily === 'serif' ? 'serif' : 'sans-serif',
+                        textShadow: '0 2px 4px rgba(0,0,0,0.7)',
+                        touchAction: selectable ? 'manipulation' : undefined,
+                        outline: selected ? '2px solid var(--accent)' : undefined,
+                      }}
+                      onClick={selectable ? (e) => { e.stopPropagation(); selectEditorItem({ kind: 'effect', id: `text:${overlay.id}` }); } : undefined}
+                      onKeyDown={selectable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); selectEditorItem({ kind: 'effect', id: `text:${overlay.id}` }); } } : undefined}
+                    >{overlay.text}</span>
                   );
                 })}
                 {/* Subtitle preview */}
                 {state.subtitles.map((cue) => {
                   const visible = previewProjectTime >= cue.startTime && previewProjectTime < cue.endTime;
                   if (!visible) return null;
+                  const selectable = overlayTool === 'select';
+                  const selected = editingSubtitleId === cue.id;
                   return (
-                    <div key={cue.id} className={`absolute z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                    <div key={cue.id} className={`absolute z-20 ${selectable ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                      role={selectable ? 'button' : undefined}
+                      tabIndex={selectable ? 0 : undefined}
+                      aria-pressed={selectable ? selected : undefined}
+                      aria-label={selectable ? t('select_overlay_named', { name: cue.text || t('subtitles') }) : undefined}
                       style={{
                         left: `${cue.position.x}%`, top: `${cue.position.y}%`,
                         width: `${cue.width}%`, maxWidth: '90%',
@@ -2385,9 +2446,11 @@ export default function Editor() {
                         wordWrap: 'break-word',
                         padding: '2px 4px',
                         borderRadius: '2px',
-                        outline: editingSubtitleId === cue.id ? '2px solid #6366f1' : undefined,
+                        touchAction: selectable ? 'manipulation' : undefined,
+                        outline: selected ? '2px solid var(--accent)' : undefined,
                       }}
-                      onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); selectEditorItem({ kind: 'subtitle', id: cue.id }); } }}
+                      onClick={selectable ? (e) => { e.stopPropagation(); selectEditorItem({ kind: 'subtitle', id: cue.id }); } : undefined}
+                      onKeyDown={selectable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); selectEditorItem({ kind: 'subtitle', id: cue.id }); } } : undefined}
                     >{cue.text || '…'}</div>
                   );
                 })}
@@ -2395,6 +2458,8 @@ export default function Editor() {
                 {state.visualOverlays.map((overlay) => {
                   const visible = previewProjectTime >= overlay.startTime && previewProjectTime < overlay.endTime;
                   if (!visible) return null;
+                  const selectable = overlayTool === 'select';
+                  const selected = selectedOverlayId === overlay.id;
                   const overlayStyle: React.CSSProperties = {
                     position: 'absolute',
                     left: `${overlay.position.x}%`,
@@ -2403,18 +2468,35 @@ export default function Editor() {
                     height: `${overlay.size.h}%`,
                     transform: computeOverlayCssTransform(overlay.position, overlay.rotation),
                     opacity: overlay.opacity,
-                    outline: selectedOverlayId === overlay.id ? '2px solid #6366f1' : undefined,
+                    touchAction: selectable ? 'manipulation' : undefined,
+                    outline: selected ? '2px solid var(--accent)' : undefined,
                   };
+                  const selectKind: EditorSelection = overlay.type === 'image'
+                    ? { kind: 'image', id: overlay.id }
+                    : { kind: 'effect', id: `overlay:${overlay.id}` };
+                  const accessibleName = t('select_overlay_named', {
+                    name: overlay.type === 'rectangle' ? t('add_rectangle')
+                      : overlay.type === 'image' ? t('add_image')
+                        : t('add_drawing'),
+                  });
+                  const interactiveProps = selectable ? {
+                    role: 'button' as const,
+                    tabIndex: 0,
+                    'aria-pressed': selected,
+                    'aria-label': accessibleName,
+                    onClick: (e: React.MouseEvent) => { e.stopPropagation(); selectEditorItem(selectKind); },
+                    onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); selectEditorItem(selectKind); } },
+                  } : {};
                   if (overlay.type === 'rectangle') {
                     return (
-                      <div key={overlay.id} className={`z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                      <div key={overlay.id} className={`z-20 ${selectable ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                        {...interactiveProps}
                         style={{
                           ...overlayStyle,
                           border: overlay.strokeWidth > 0 ? `${overlay.strokeWidth}px solid ${overlay.strokeColor}` : undefined,
                           backgroundColor: overlay.fillColor || undefined,
                           borderRadius: `${overlay.borderRadius}px`,
                         }}
-                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); selectEditorItem({ kind: 'effect', id: `overlay:${overlay.id}` }); } }}
                       />
                     );
                   }
@@ -2422,18 +2504,18 @@ export default function Editor() {
                     return (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img key={overlay.id} src={(overlay as ImageOverlay).url} alt=""
-                        className={`z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                        className={`z-20 ${selectable ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                        {...interactiveProps}
                         style={overlayStyle}
-                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); selectEditorItem({ kind: 'image', id: overlay.id }); } }}
                       />
                     );
                   }
                   if (overlay.type === 'drawing') {
                     return (
                       <svg key={overlay.id}
-                        className={`z-20 ${overlayTool === 'select' ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                        className={`z-20 ${selectable ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'}`}
+                        {...interactiveProps}
                         style={overlayStyle} viewBox="0 0 100 100" preserveAspectRatio="none"
-                        onClick={(e) => { if (overlayTool === 'select') { e.stopPropagation(); selectEditorItem({ kind: 'effect', id: `overlay:${overlay.id}` }); } }}
                       >
                         <polyline
                           points={(overlay as DrawingOverlay).points.map((p) => `${p.x * 100},${p.y * 100}`).join(' ')}
@@ -2479,7 +2561,10 @@ export default function Editor() {
           </div>
 
           {/* ─── Transport Controls ──────────────────────────────────────── */}
-          <div className="flex h-14 shrink-0 items-center justify-center gap-3 border-t border-[var(--border)] bg-[var(--panel)] sm:gap-5">
+          <div className="relative flex h-14 shrink-0 items-center justify-center gap-1.5 border-t border-[var(--border)] bg-[var(--panel)] sm:gap-5">
+            <output className="absolute left-2 font-mono text-xs text-[var(--muted)] sm:left-3" aria-label={t('timeline_playhead')}>
+              {formatEditorTime(previewProjectTime)}<span className="hidden md:inline"> / {formatEditorTime(projectDurationSpeedAware)}</span>
+            </output>
             <button onClick={() => seek(-5)} disabled={!activeClip} className={iconButton} aria-label={t('back_five')} title={t('back_five')}><RotateCcw className="h-4 w-4" /></button>
             <button onClick={splitAtPlayhead} disabled={!canContextSplit} className={iconButton} aria-label={`${t('split_at_playhead')} (S)`} title={canContextSplit ? `${t('split_at_playhead')} (S)` : t('split_unavailable')}><Scissors className="h-4 w-4" /></button>
             <button onClick={togglePlay} disabled={!activeClip} className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--text)] text-[var(--panel)] transition hover:scale-105 disabled:cursor-not-allowed disabled:opacity-40" aria-label={isPlaying ? t('pause') : t('play')}>{isPlaying ? <Pause className="h-5 w-5" /> : <Play className="ml-0.5 h-5 w-5" />}</button>
@@ -2503,47 +2588,48 @@ export default function Editor() {
 
         {/* ─── Inspector (Right) ───────────────────────────────────────── */}
         <aside
-          data-maximized={maximizedPanel === 'inspector'}
-          className={`workspace-side-panel fixed inset-x-0 bottom-0 z-30 flex max-h-[70dvh] flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--panel)] transition-[transform,width] lg:static lg:inset-auto lg:max-h-none lg:w-[var(--inspector-panel-width)] lg:rounded-none lg:border-l lg:border-t-0 ${maximizedPanel === 'inspector' ? 'lg:fixed lg:inset-0 lg:z-50 lg:max-h-none' : ''} ${mobilePanel === 'inspector' ? 'translate-y-0' : 'translate-y-full lg:translate-y-0'}`}
-          style={{ '--inspector-panel-width': maximizedPanel === 'inspector' ? '100vw' : `${rightPanelCollapsed ? 48 : rightPanelWidth}px` } as React.CSSProperties}
+          ref={inspectorSheetRef}
+          tabIndex={mobilePanel === 'inspector' ? -1 : undefined}
+          onKeyDown={mobilePanel === 'inspector' ? (event) => trapFocus(event, inspectorSheetRef) : undefined}
+          className={`workspace-side-panel fixed inset-x-0 bottom-0 z-30 flex max-h-[70dvh] flex-col overflow-hidden rounded-t-2xl border-t border-[var(--border)] bg-[var(--panel)] transition-[transform,width,visibility] lg:static lg:inset-auto lg:max-h-none lg:w-[var(--inspector-panel-width)] lg:translate-y-0 lg:visible lg:rounded-none lg:border-l lg:border-t-0 ${mobilePanel === 'inspector' ? 'visible translate-y-0' : 'invisible translate-y-full'}`}
+          style={{ '--inspector-panel-width': `${rightPanelCollapsed ? 48 : rightPanelWidth}px` } as React.CSSProperties}
           aria-label={t('inspector')} role={mobilePanel === 'inspector' ? 'dialog' : undefined} aria-modal={mobilePanel === 'inspector' ? true : undefined}
         >
           <div className="flex h-3 shrink-0 items-center justify-center lg:hidden" aria-hidden="true"><span className="h-1 w-10 rounded-full bg-[var(--border)]" /></div>
-          {/* Tab Bar */}
+          {/* Tab Bar — contextual destinations, selected material first */}
           <div className="flex min-h-12 shrink-0 items-center border-b border-[var(--border)] px-1">
             <div role="tablist" aria-label={t('inspector')} className={`flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto ${rightPanelCollapsed ? 'lg:hidden' : ''}`}>
-              {INSPECTOR_TABS.map((tab) => (
+              {visibleInspectorTabs.map((tab) => (
                 <button
                   key={tab}
                   id={`inspector-tab-${tab}`}
                   role="tab"
-                  aria-selected={inspectorTab === tab}
+                  aria-selected={effectiveInspectorTab === tab}
                   aria-controls="inspector-panel"
-                  tabIndex={inspectorTab === tab ? 0 : -1}
+                  tabIndex={effectiveInspectorTab === tab ? 0 : -1}
                   onClick={() => setInspectorTab(tab)}
                   onKeyDown={(event) => {
                     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
                     event.preventDefault();
-                    const currentIndex = INSPECTOR_TABS.indexOf(tab);
+                    const currentIndex = visibleInspectorTabs.indexOf(tab);
                     const nextIndex = event.key === 'Home' ? 0
-                      : event.key === 'End' ? INSPECTOR_TABS.length - 1
-                        : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + INSPECTOR_TABS.length) % INSPECTOR_TABS.length;
-                    const nextTab = INSPECTOR_TABS[nextIndex];
+                      : event.key === 'End' ? visibleInspectorTabs.length - 1
+                        : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + visibleInspectorTabs.length) % visibleInspectorTabs.length;
+                    const nextTab = visibleInspectorTabs[nextIndex];
                     setInspectorTab(nextTab);
                     window.requestAnimationFrame(() => document.getElementById(`inspector-tab-${nextTab}`)?.focus());
                   }}
-                  className={`min-h-11 min-w-14 flex-1 whitespace-nowrap rounded-t-md px-2 py-2 text-xs font-medium transition-colors ${inspectorTab === tab ? 'border-b-2 border-indigo-500 bg-indigo-500/5 text-indigo-500' : 'text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]'}`}
+                  className={`min-h-11 min-w-14 flex-1 whitespace-nowrap rounded-t-md px-2 py-2 text-xs font-medium transition-colors ${effectiveInspectorTab === tab ? 'border-b-2 border-[var(--accent)] bg-[var(--accent)]/5 text-[var(--accent)]' : 'text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]'}`}
                 >{t(`tab_${tab}`)}</button>
               ))}
             </div>
-            {maximizedPanel !== 'inspector' && <button type="button" onClick={() => setRightPanelCollapsed((value) => !value)} className={`${iconButton} hidden lg:inline-flex`} aria-label={rightPanelCollapsed ? t('expand_panel') : t('collapse_panel')} title={rightPanelCollapsed ? t('expand_panel') : t('collapse_panel')}>{rightPanelCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</button>}
-            {!rightPanelCollapsed && <button type="button" onClick={() => setMaximizedPanel(maximizedPanel === 'inspector' ? null : 'inspector')} className={`${iconButton} hidden lg:inline-flex`} aria-pressed={maximizedPanel === 'inspector'} aria-label={maximizedPanel === 'inspector' ? t('restore_panel') : t('maximize_panel')} title={maximizedPanel === 'inspector' ? t('restore_panel') : t('maximize_panel')}>{maximizedPanel === 'inspector' ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}</button>}
-            <button onClick={() => setMobilePanel(null)} className={`${iconButton} ml-1 lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
+            <button type="button" onClick={() => setRightPanelCollapsed((value) => !value)} className={`${iconButton} hidden lg:inline-flex`} aria-label={rightPanelCollapsed ? t('expand_panel') : t('collapse_panel')} title={rightPanelCollapsed ? t('expand_panel') : t('collapse_panel')}>{rightPanelCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</button>
+            <button onClick={closeMobilePanel} className={`${iconButton} ml-1 lg:hidden`} aria-label={t('close')}><X className="h-4 w-4" /></button>
           </div>
 
-          <div id="inspector-panel" role="tabpanel" aria-labelledby={`inspector-tab-${inspectorTab}`} className={`flex-1 space-y-6 overflow-y-auto p-4 ${rightPanelCollapsed ? 'lg:hidden' : ''}`}>
+          <div id="inspector-panel" role="tabpanel" aria-labelledby={`inspector-tab-${effectiveInspectorTab}`} className={`flex-1 space-y-6 overflow-y-auto p-4 ${rightPanelCollapsed ? 'lg:hidden' : ''}`}>
             {/* ── Clip Tab ─────────────────────────────────────────────── */}
-            {inspectorTab === 'clip' && (
+            {effectiveInspectorTab === 'clip' && (
               <>
                 <section aria-labelledby="trim-heading">
                   <h2 id="trim-heading" className="mb-3 text-sm font-semibold">{t('trim')}</h2>
@@ -2577,7 +2663,7 @@ export default function Editor() {
             )}
 
             {/* ── Project Tab ──────────────────────────────────────────── */}
-            {inspectorTab === 'project' && (
+            {effectiveInspectorTab === 'project' && (
               <>
                 {/* Canvas Aspect */}
                 <section aria-labelledby="aspect-heading">
@@ -2665,7 +2751,7 @@ export default function Editor() {
             )}
 
             {/* ── Audio Tab ────────────────────────────────────────────── */}
-            {inspectorTab === 'audio' && (
+            {effectiveInspectorTab === 'audio' && (
               <>
                 {selection?.kind === 'source-audio' && activeClip && (
                   <section aria-labelledby="source-audio-heading" className="rounded border border-amber-500/30 bg-amber-500/5 p-3">
@@ -2759,7 +2845,7 @@ export default function Editor() {
             )}
 
             {/* ── Effects Tab ──────────────────────────────────────────── */}
-            {inspectorTab === 'effects' && (
+            {effectiveInspectorTab === 'effects' && (
               <>
                 {/* Filters */}
                 <section aria-labelledby="filters-heading">
@@ -2850,7 +2936,7 @@ export default function Editor() {
             )}
 
             {/* ── Subtitles & Overlays Tab ─────────────────────────────── */}
-            {inspectorTab === 'subtitles' && (
+            {effectiveInspectorTab === 'subtitles' && (
               <>
                 {/* Overlay tool bar */}
                 <section aria-labelledby="overlay-tools-heading">
@@ -3043,45 +3129,30 @@ export default function Editor() {
             )}
           </div>
 
-          {/* ─── Sticky Export Button ──────────────────────────────────── */}
-          <div className={`shrink-0 border-t border-[var(--border)] bg-[var(--panel)] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] ${rightPanelCollapsed ? 'lg:hidden' : ''}`}>
-            <p className="mb-1.5 text-xs text-[var(--muted)]">
-              {state.exportSettings.resolution} · {state.exportSettings.frameRate} fps · {t(`quality_${state.exportSettings.quality}`)}
-            </p>
-            <button
-              ref={exportTriggerRef} type="button" onClick={() => setExportModalOpen(true)} disabled={processing || !state.clips.length}
-              className="flex w-full items-center justify-center gap-2 rounded-md bg-indigo-600 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Download className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('open_export_settings')}
-            </button>
-          </div>
-          {!rightPanelCollapsed && maximizedPanel !== 'inspector' && <div role="separator" aria-label={t('resize_inspector_panel')} aria-orientation="vertical" aria-valuemin={220} aria-valuemax={720} aria-valuenow={Math.round(rightPanelWidth)} tabIndex={0} className="absolute inset-y-0 left-0 z-40 hidden w-2 -translate-x-1/2 cursor-col-resize touch-none lg:block" onPointerDown={(event) => startWorkspaceResize(event, 'inspector')} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); resizeWorkspaceFromKeyboard('inspector', (event.key === 'ArrowLeft' ? 1 : -1) * (event.shiftKey ? 48 : 16)); }} />}
+          {!rightPanelCollapsed && <div role="separator" aria-label={t('resize_inspector_panel')} aria-orientation="vertical" aria-valuemin={220} aria-valuemax={720} aria-valuenow={Math.round(rightPanelWidth)} tabIndex={0} className="workspace-resizer workspace-resizer-x absolute inset-y-0 left-0 z-40 hidden -translate-x-1/2 lg:block" onPointerDown={(event) => startWorkspaceResize(event, 'inspector')} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); resizeWorkspaceFromKeyboard('inspector', (event.key === 'ArrowLeft' ? 1 : -1) * (event.shiftKey ? 48 : 16)); }} />}
         </aside>
       </div>
 
       {/* ─── Timeline ────────────────────────────────────────────────────── */}
       <footer
-        className={`flex flex-col border-t border-[var(--border)] bg-[var(--panel)] transition-[height] ${maximizedPanel === 'timeline' ? 'fixed inset-0 z-50' : 'relative shrink-0'}`}
-        style={{ height: timelineCollapsed ? '2.5rem' : maximizedPanel === 'timeline' ? '100dvh' : `${timelineHeight}px` }}
+        className="relative flex shrink-0 flex-col border-t border-[var(--border)] bg-[var(--panel)] transition-[height]"
+        style={{ height: timelineCollapsed ? '2.5rem' : `${timelineHeight}px` }}
       >
-        {!timelineCollapsed && maximizedPanel !== 'timeline' && <div role="separator" aria-label={t('resize_timeline_panel')} aria-orientation="horizontal" aria-valuemin={180} aria-valuemax={Math.max(220, typeof window === 'undefined' ? 800 : window.innerHeight - 160)} aria-valuenow={Math.round(timelineHeight)} tabIndex={0} className="absolute inset-x-0 top-0 z-40 h-2 -translate-y-1/2 cursor-row-resize touch-none" onPointerDown={(event) => startWorkspaceResize(event, 'timeline')} onKeyDown={(event) => { if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return; event.preventDefault(); resizeWorkspaceFromKeyboard('timeline', (event.key === 'ArrowUp' ? 1 : -1) * (event.shiftKey ? 48 : 16)); }} />}
+        {!timelineCollapsed && <div role="separator" aria-label={t('resize_timeline_panel')} aria-orientation="horizontal" aria-valuemin={180} aria-valuemax={Math.max(220, typeof window === 'undefined' ? 800 : window.innerHeight - 160)} aria-valuenow={Math.round(timelineHeight)} tabIndex={0} className="workspace-resizer workspace-resizer-y absolute inset-x-0 top-0 z-40 -translate-y-1/2" onPointerDown={(event) => startWorkspaceResize(event, 'timeline')} onKeyDown={(event) => { if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return; event.preventDefault(); resizeWorkspaceFromKeyboard('timeline', (event.key === 'ArrowUp' ? 1 : -1) * (event.shiftKey ? 48 : 16)); }} />}
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border)] px-3 text-xs text-[var(--muted)] sm:px-4">
-          <button onClick={() => { setTimelineCollapsed(!timelineCollapsed); if (!timelineCollapsed) setMaximizedPanel(null); }} className={iconButton} aria-label={timelineCollapsed ? t('expand_timeline') : t('collapse_timeline')}>
+          <button onClick={() => setTimelineCollapsed(!timelineCollapsed)} className={iconButton} aria-label={timelineCollapsed ? t('expand_timeline') : t('collapse_timeline')}>
             {timelineCollapsed ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           </button>
-          {!timelineCollapsed && <button type="button" onClick={() => setMaximizedPanel(maximizedPanel === 'timeline' ? null : 'timeline')} className={iconButton} aria-pressed={maximizedPanel === 'timeline'} aria-label={maximizedPanel === 'timeline' ? t('restore_panel') : t('maximize_panel')} title={maximizedPanel === 'timeline' ? t('restore_panel') : t('maximize_panel')}>{maximizedPanel === 'timeline' ? <Minimize className="h-3.5 w-3.5" /> : <Maximize className="h-3.5 w-3.5" />}</button>}
           <span><strong className="text-[var(--text)]">V1</strong> {t('video_track')}</span>
           <span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('source_audio_track')}</span>
           {!timelineCollapsed && <button type="button" onClick={splitAtPlayhead} disabled={!canContextSplit} className={`${iconButton} gap-1 px-2`} title={canContextSplit ? t('split_at_playhead') : t('split_unavailable')}><Scissors className="h-3.5 w-3.5" /><span className="hidden sm:inline">{t('cut')}</span></button>}
-          <span className="ml-auto hidden font-mono sm:inline">{t('project_duration', { value: projectDurationSpeedAware.toFixed(1) })}{state.transitions.length > 0 && outputDuration < projectDurationSpeedAware - 0.01 ? ` · ${t('output_duration', { value: outputDuration.toFixed(1) })}` : ''}</span>
-          {/* Zoom controls */}
+          <span className="ml-auto hidden font-mono sm:inline">{formatEditorTime(previewProjectTime)} / {formatEditorTime(projectDurationSpeedAware)}{state.transitions.length > 0 && outputDuration < projectDurationSpeedAware - 0.01 ? ` · ${t('output_duration', { value: outputDuration.toFixed(1) })}` : ''}</span>
+          {/* Zoom controls — one 0.25 step for buttons; Ctrl/Meta+wheel matches */}
           <div className="flex items-center gap-0.5">
-            <button onClick={() => setTimelineZoom(Math.max(0.3, timelineZoom - 0.3))} className={iconButton} aria-label={t('zoom_out')} title={t('zoom_out')}><ZoomOut className="h-3.5 w-3.5" /></button>
-            <button onClick={() => setTimelineZoom(1)} className="rounded px-1.5 py-0.5 text-xs font-mono hover:bg-[var(--raised)]" aria-label={t('zoom_fit')} title={t('zoom_fit')}>{(timelineZoom * 100).toFixed(0)}%</button>
-            <button onClick={() => setTimelineZoom(Math.min(5, timelineZoom + 0.3))} className={iconButton} aria-label={t('zoom_in')} title={t('zoom_in')}><ZoomIn className="h-3.5 w-3.5" /></button>
+            <button onClick={() => setTimelineZoom((z) => stepTimelineZoom(z, -1))} className={iconButton} aria-label={t('zoom_out')} title={t('zoom_out')}><ZoomOut className="h-3.5 w-3.5" /></button>
+            <button onClick={() => setTimelineZoom(1)} className="rounded px-1.5 py-0.5 text-xs font-mono hover:bg-[var(--raised)]" aria-label={t('zoom_reset')} title={t('zoom_reset')}>{(timelineZoom * 100).toFixed(0)}%</button>
+            <button onClick={() => setTimelineZoom((z) => stepTimelineZoom(z, 1))} className={iconButton} aria-label={t('zoom_in')} title={t('zoom_in')}><ZoomIn className="h-3.5 w-3.5" /></button>
           </div>
-          <span className="truncate font-mono text-indigo-500">{activeClip ? `${t('active_trim')}: ${activeClip.trimStart.toFixed(1)}s – ${activeClip.trimEnd.toFixed(1)}s` : t('no_clip')}</span>
         </div>
         {!timelineCollapsed && (
           state.clips.length ? (
@@ -3152,11 +3223,11 @@ export default function Editor() {
 
       {/* ─── Help Modal ──────────────────────────────────────────────────── */}
       {showHelpModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 backdrop-blur-sm" onMouseDown={(event) => { if (event.currentTarget === event.target) setShowHelpModal(false); }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 backdrop-blur-sm" onMouseDown={(event) => { if (event.currentTarget === event.target) closeHelpModal(); }}>
           <div ref={helpDialogRef} role="dialog" aria-modal="true" aria-labelledby="help-heading" tabIndex={-1} onKeyDown={(e) => trapFocus(e, helpDialogRef)} className="w-full max-w-md rounded-xl border border-[var(--border)] bg-[var(--panel)] p-5 shadow-2xl">
             <div className="flex items-center justify-between mb-4">
               <h2 id="help-heading" className="text-sm font-semibold">{t('keyboard_shortcuts')}</h2>
-              <button onClick={() => setShowHelpModal(false)} className={iconButton} aria-label={t('close')}><X className="h-4 w-4" /></button>
+              <button onClick={closeHelpModal} className={iconButton} aria-label={t('close')}><X className="h-4 w-4" /></button>
             </div>
             <div className="space-y-2 text-xs">
               {[
@@ -3186,11 +3257,11 @@ export default function Editor() {
 
       {/* ─── Project Manager Modal ───────────────────────────────────────── */}
       {showProjectManager && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 backdrop-blur-sm" onMouseDown={(event) => { if (event.currentTarget === event.target) setShowProjectManager(false); }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-3 backdrop-blur-sm" onMouseDown={(event) => { if (event.currentTarget === event.target) closeProjectManager(); }}>
           <div ref={projectDialogRef} role="dialog" aria-modal="true" aria-labelledby="pm-heading" tabIndex={-1} onKeyDown={(e) => trapFocus(e, projectDialogRef)} className="w-full max-w-lg rounded-xl border border-[var(--border)] bg-[var(--panel)] shadow-2xl overflow-hidden flex flex-col max-h-[80dvh]">
             <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
               <h2 id="pm-heading" className="text-sm font-semibold">{t('projects')}</h2>
-              <button onClick={() => setShowProjectManager(false)} className={iconButton} aria-label={t('close')}><X className="h-4 w-4" /></button>
+              <button onClick={closeProjectManager} className={iconButton} aria-label={t('close')}><X className="h-4 w-4" /></button>
             </div>
             <div className="p-4 border-b border-[var(--border)]">
               <div className="flex gap-2">

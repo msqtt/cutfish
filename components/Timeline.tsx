@@ -8,7 +8,7 @@ import {
   type TimelineClipLayout,
 } from '@/lib/audio-track-utils';
 import { reorderTargetFromCenters } from '@/lib/editor-workflow';
-import { resolveVisibleTimelineTracks } from '@/lib/workspace-utils';
+import { formatEditorTime, resolveVisibleTimelineTracks, stepTimelineZoom } from '@/lib/workspace-utils';
 
 export interface TimelineItem {
   id: string;
@@ -42,7 +42,8 @@ const PX_PER_SECOND = 14;
 const CLIP_MIN_PX = 120;
 const CLIP_GAP_PX = 8;
 const SURFACE_PAD_PX = 8;
-const TRACK_LABEL_PX = 76;
+/** Single source of truth for the sticky track-label gutter width. */
+export const TRACK_LABEL_PX = 76;
 
 function getPlaybackDuration(clip: TimelineItem) {
   return Math.max(0.01, (clip.trimEnd - clip.trimStart) / (clip.speed && clip.speed > 0 ? clip.speed : 1));
@@ -307,7 +308,7 @@ export default function Timeline({
   const handleWheel = useCallback((event: WheelEvent) => {
     if (event.ctrlKey || event.metaKey) {
       event.preventDefault();
-      onZoomChange?.(Math.max(0.3, Math.min(5, zoom + (event.deltaY > 0 ? -0.2 : 0.2))));
+      onZoomChange?.(stepTimelineZoom(zoom, event.deltaY > 0 ? -1 : 1));
     }
   }, [onZoomChange, zoom]);
 
@@ -319,7 +320,7 @@ export default function Timeline({
   }, [handleWheel]);
 
   if (collapsed) {
-    return <div className="flex h-8 items-center justify-center text-xs text-[var(--muted)]">{clips.length} {t('video_track').toLowerCase()} · {projectDuration.toFixed(1)}s</div>;
+    return <div className="flex h-8 items-center justify-center text-xs text-[var(--muted)]">{clips.length} {t('video_track').toLowerCase()} · {formatEditorTime(projectDuration)}</div>;
   }
 
   const playheadPx = projectTimeToPixel(activeProjectTime);
@@ -333,19 +334,19 @@ export default function Timeline({
   const trackWidth = Math.max(totalClipsPx, projectTimeToPixel(furthestProjectTime) + SURFACE_PAD_PX, 1);
 
   const trackLabel = (code: string, label: string) => (
-    <div className="sticky left-0 z-30 flex h-full w-[76px] shrink-0 items-center gap-1 border-r border-[var(--border)] bg-[var(--panel)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">
+    <div className="sticky left-0 z-30 flex h-full shrink-0 items-center gap-1 border-r border-[var(--border)] bg-[var(--panel)] px-2 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]" style={{ width: `${TRACK_LABEL_PX}px` }}>
       <strong className="text-[var(--text)]">{code}</strong><span className="truncate">{label}</span>
     </div>
   );
 
   const renderTimedTrack = (track: TimelineTimedTrack, code: string, label: string, items: TimelineTimedItem[], palette: string) => (
-    <div className="flex h-10 shrink-0" role="group" aria-label={label}>
+    <div className="flex h-12 shrink-0" role="group" aria-label={label}>
       {trackLabel(code, label)}
       <div className="relative h-full shrink-0 border-b border-[var(--border)]/60" style={{ width: `${trackWidth}px`, minWidth: `calc(100% - ${TRACK_LABEL_PX}px)` }} onPointerDown={() => onSelectTimedItem?.(track, null)}>
-        {items.length === 0 && <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-[var(--muted)]/70">{t('empty_track')}</span>}
+        {items.length === 0 && <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-[var(--muted)]/70">{t('empty_track')}</span>}
         {items.map((item) => {
           const left = projectTimeToPixel(item.startTime);
-          const width = Math.max(24, projectTimeToPixel(item.endTime) - left);
+          const width = Math.max(44, projectTimeToPixel(item.endTime) - left);
           const selected = selectedTimedItem?.track === track && selectedTimedItem.id === item.id;
           return (
             <button
@@ -356,7 +357,7 @@ export default function Timeline({
               aria-label={t('timeline_timed_label', { name: item.name, track: label, start: item.startTime.toFixed(2), duration: Math.max(0, item.endTime - item.startTime).toFixed(2) })}
               aria-describedby="timeline-timed-help"
               style={{ left: `${left}px`, width: `${width}px` }}
-              className={`absolute inset-y-1 flex touch-none items-center overflow-hidden rounded border px-2 text-left text-[10px] font-medium transition ${palette} ${item.movable === false ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'} ${selected ? 'ring-2 ring-white/60' : ''} ${draggingTimedId === `${track}:${item.id}` ? 'opacity-70' : ''}`}
+              className={`absolute inset-y-0.5 flex touch-none items-center overflow-hidden rounded border px-2 text-left text-xs font-medium transition ${palette} ${item.movable === false ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'} ${selected ? 'ring-2 ring-white/60' : ''} ${draggingTimedId === `${track}:${item.id}` ? 'opacity-70' : ''}`}
               onPointerDown={(event) => handleTimedDrag(event, track, item)}
               onClick={(event) => { event.stopPropagation(); onSelectTimedItem?.(track, item.id); }}
               onKeyDown={(event) => {
@@ -420,10 +421,10 @@ export default function Timeline({
                   aria-label={t('timeline_clip_label', { name: clip.name, index: index + 1, total: clips.length, duration: duration.toFixed(2) })}
                   className={`relative h-12 w-full touch-pan-x cursor-grab overflow-hidden rounded-md border bg-[var(--raised)] text-left transition active:cursor-grabbing ${active ? 'border-indigo-500' : 'border-[var(--border)] hover:border-indigo-400'} ${draggedId === clip.id ? 'opacity-50' : ''}`}
                 >
-                  <span data-drag-handle className="absolute inset-y-0 left-0 z-10 flex w-6 touch-none items-center justify-center text-[10px] text-[var(--muted)]" aria-hidden="true">⠿</span>
+                  <span data-drag-handle className="absolute inset-y-0 left-0 z-10 flex w-6 touch-none items-center justify-center text-xs text-[var(--muted)]" aria-hidden="true">⠿</span>
                   <span className="absolute inset-0 bg-gradient-to-r from-indigo-500/15 via-transparent to-cyan-500/10" />
                   <span className="relative block truncate pl-7 pr-3 pt-1.5 text-xs font-medium">{clip.name}</span>
-                  <span className="relative block pl-7 pr-3 pt-0.5 font-mono text-[10px] text-[var(--muted)]">{duration.toFixed(2)}s</span>
+                  <span className="relative block pl-7 pr-3 pt-0.5 font-mono text-xs text-[var(--muted)]">{duration.toFixed(2)}s</span>
                 </button>
               </div>
             );
@@ -432,7 +433,7 @@ export default function Timeline({
       </div>
 
       {visibleTracks.includes('source-audio') && (
-        <div className="flex h-10 shrink-0" role="group" aria-label={t('source_audio_track')}>
+        <div className="flex h-12 shrink-0" role="group" aria-label={t('source_audio_track')}>
           {trackLabel('A1', t('source_audio_track'))}
           <div data-clip-row="source-audio" className="flex h-full shrink-0 items-center gap-2 border-b border-[var(--border)]/60" role="group" style={{ width: `${trackWidth}px`, minWidth: `calc(100% - ${TRACK_LABEL_PX}px)` }}>
             {clips.map((clip, index) => {
@@ -447,7 +448,7 @@ export default function Timeline({
                   aria-label={t('timeline_source_audio_label', { name: clip.name, volume: clip.volume ?? 100, state: muted ? t('muted_state') : t('audible_state') })}
                   title={`${clip.name} · ${t('linked_to_video')} · ${muted ? t('muted_state') : `${clip.volume ?? 100}%`}`}
                   style={{ width: `${Math.max(CLIP_MIN_PX, duration * PX_PER_SECOND * zoom)}px` }}
-                  className={`relative h-8 touch-pan-x shrink-0 cursor-grab overflow-hidden rounded border pl-7 pr-2 text-left text-[10px] transition active:cursor-grabbing ${activeClipId === clip.id ? 'border-amber-300 ring-1 ring-amber-300/60' : 'border-amber-600/50 hover:border-amber-400'} ${muted ? 'bg-amber-950/20 text-amber-200/45' : 'bg-gradient-to-r from-amber-500/30 via-orange-500/20 to-amber-500/30 text-amber-100'} ${draggedId === clip.id ? 'opacity-50' : ''} ${dropIndex === index && draggedId !== clip.id ? 'ring-2 ring-indigo-400' : ''}`}
+                  className={`relative h-11 touch-pan-x shrink-0 cursor-grab overflow-hidden rounded border pl-7 pr-2 text-left text-xs transition active:cursor-grabbing ${activeClipId === clip.id ? 'border-amber-300 ring-1 ring-amber-300/60' : 'border-amber-600/50 hover:border-amber-400'} ${muted ? 'bg-amber-950/20 text-amber-200/45' : 'bg-gradient-to-r from-amber-500/30 via-orange-500/20 to-amber-500/30 text-amber-100'} ${draggedId === clip.id ? 'opacity-50' : ''} ${dropIndex === index && draggedId !== clip.id ? 'ring-2 ring-indigo-400' : ''}`}
                   onPointerDown={(event) => handleClipPointerDown(event, clip.id)}
                   onClick={() => { if (suppressClipClickRef.current) return; onSelectSourceAudio?.(clip.id); onSeek(clip.id, clip.trimStart); }}
                   onKeyDown={(event) => {
@@ -457,7 +458,7 @@ export default function Timeline({
                     onReorder(clip.id, index + (event.key === 'ArrowLeft' ? -1 : 1));
                   }}
                 >
-                  <span data-drag-handle className="absolute inset-y-0 left-0 z-10 flex w-6 touch-none items-center justify-center text-[10px] opacity-70" aria-hidden="true">⠿</span>
+                  <span data-drag-handle className="absolute inset-y-0 left-0 z-10 flex w-6 touch-none items-center justify-center text-xs opacity-70" aria-hidden="true">⠿</span>
                   <span className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-current opacity-30" aria-hidden="true" />
                   <span className="relative flex items-center justify-between gap-2"><span className="truncate">{clip.name}</span><span className="shrink-0 font-mono">{muted ? t('muted_state') : `${clip.volume ?? 100}%`}</span></span>
                 </button>
@@ -468,7 +469,7 @@ export default function Timeline({
       )}
 
       {visibleTracks.includes('background-audio') && (
-        <div className="flex h-10 shrink-0" role="group" aria-label={t('background_audio_track')}>
+        <div className="flex h-12 shrink-0" role="group" aria-label={t('background_audio_track')}>
           {trackLabel('A2', t('background_audio_track'))}
           <div
             className="relative h-full shrink-0 border-b border-[var(--border)]/60"
@@ -481,14 +482,14 @@ export default function Timeline({
               onBackgroundAudioDrop?.(Math.max(0, pointerProjectTime(event.clientX, containerRef.current)));
             }}
           >
-            {audioSegments.length === 0 && <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-[var(--muted)]/80">{t('drop_audio_here')}</span>}
+            {audioSegments.length === 0 && <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-xs text-[var(--muted)]/80">{t('drop_audio_here')}</span>}
             {audioSegments.map((segment) => {
               const duration = getAudioSegmentDuration(segment);
               const left = projectTimeToPixel(segment.projectStart);
-              const width = Math.max(24, projectTimeToPixel(segment.projectStart + duration) - left);
+              const width = Math.max(44, projectTimeToPixel(segment.projectStart + duration) - left);
               const selected = selectedAudioSegmentId === segment.id;
               return (
-                <button key={segment.id} data-timeline-item type="button" aria-pressed={selected} aria-label={t('timeline_audio_label', { name: segment.name, start: segment.projectStart.toFixed(2), duration: duration.toFixed(2) })} aria-describedby="timeline-audio-help" title={segment.name} style={{ left: `${left}px`, width: `${width}px` }} className={`absolute inset-y-1 flex cursor-grab touch-none items-center overflow-hidden rounded border bg-gradient-to-r from-emerald-500/35 to-teal-500/20 px-2 text-left text-[10px] font-medium text-emerald-100 transition active:cursor-grabbing ${selected ? 'border-emerald-300 ring-2 ring-emerald-300/60' : 'border-emerald-600/50 hover:border-emerald-400'} ${draggingAudioId === segment.id ? 'opacity-70' : ''}`} onPointerDown={(event) => handleAudioDrag(event, segment)} onClick={(event) => { event.stopPropagation(); onSelectAudioSegment?.(segment.id); }} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.stopPropagation(); onAudioEditStart?.(); onAudioSegmentMove?.(segment.id, Math.max(0, segment.projectStart + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1))); }} onBlur={() => onAudioEditEnd?.()}><span className="truncate">{segment.name}</span></button>
+                <button key={segment.id} data-timeline-item type="button" aria-pressed={selected} aria-label={t('timeline_audio_label', { name: segment.name, start: segment.projectStart.toFixed(2), duration: duration.toFixed(2) })} aria-describedby="timeline-audio-help" title={segment.name} style={{ left: `${left}px`, width: `${width}px` }} className={`absolute inset-y-0.5 flex cursor-grab touch-none items-center overflow-hidden rounded border bg-gradient-to-r from-emerald-500/35 to-teal-500/20 px-2 text-left text-xs font-medium text-emerald-100 transition active:cursor-grabbing ${selected ? 'border-emerald-300 ring-2 ring-emerald-300/60' : 'border-emerald-600/50 hover:border-emerald-400'} ${draggingAudioId === segment.id ? 'opacity-70' : ''}`} onPointerDown={(event) => handleAudioDrag(event, segment)} onClick={(event) => { event.stopPropagation(); onSelectAudioSegment?.(segment.id); }} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.stopPropagation(); onAudioEditStart?.(); onAudioSegmentMove?.(segment.id, Math.max(0, segment.projectStart + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1))); }} onBlur={() => onAudioEditEnd?.()}><span className="truncate">{segment.name}</span></button>
               );
             })}
           </div>

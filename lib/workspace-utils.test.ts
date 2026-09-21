@@ -4,6 +4,8 @@ import {
   resizeWorkspacePanel,
   moveTimedRange,
   resolveVisibleTimelineTracks,
+  stepTimelineZoom,
+  formatEditorTime,
 } from './workspace-utils';
 
 describe('workspace sizing', () => {
@@ -79,3 +81,22 @@ describe('timeline track visibility', () => {
       hasEffects: false,
     })).toEqual(['video', 'source-audio', 'tts-audio', 'subtitle']);
   });
+
+
+describe('timeline presentation controls', () => {
+  it('steps zoom consistently and clamps to the supported range', () => {
+    expect(stepTimelineZoom(1, 1)).toBe(1.25);
+    expect(stepTimelineZoom(1, -1)).toBe(0.75);
+    expect(stepTimelineZoom(4.9, 1)).toBe(5);
+    expect(stepTimelineZoom(0.35, -1)).toBe(0.3);
+    expect(stepTimelineZoom(Number.NaN, 1)).toBe(1.25);
+  });
+
+  it('formats stable project timecodes and sanitizes invalid values', () => {
+    expect(formatEditorTime(0)).toBe('0:00.0');
+    expect(formatEditorTime(65.28)).toBe('1:05.3');
+    expect(formatEditorTime(600.04)).toBe('10:00.0');
+    expect(formatEditorTime(-2)).toBe('0:00.0');
+    expect(formatEditorTime(Number.NaN)).toBe('0:00.0');
+  });
+});

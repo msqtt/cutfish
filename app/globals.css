@@ -9,6 +9,11 @@
   --border: #d1d5db;
   --text: #111827;
   --muted: #6b7280;
+  /* Semantic accents: focus rings, range thumbs, primary actions, resizers. */
+  --accent: #4f46e5;
+  --accent-strong: #4338ca;
+  --focus-ring: #6366f1;
+  --resizer: #6366f1;
 }
 
 .dark {
@@ -20,6 +25,10 @@
   --border: #2b2b30;
   --text: #f4f4f5;
   --muted: #a1a1aa;
+  --accent: #6366f1;
+  --accent-strong: #818cf8;
+  --focus-ring: #818cf8;
+  --resizer: #818cf8;
 }
 
 * { box-sizing: border-box; }
@@ -60,7 +69,7 @@ a:focus-visible,
 [role="button"]:focus-visible,
 [role="tab"]:focus-visible,
 [role="slider"]:focus-visible {
-  outline: 2px solid #6366f1;
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 button:not(:disabled):active,
@@ -74,8 +83,8 @@ summary:active { filter: brightness(0.96); }
 }
 
 @media (pointer: coarse) {
-  button, summary, [role="button"], [role="tab"] { min-height: 2.5rem !important; }
-  [role="slider"] { min-width: 2.5rem; }
+  button, summary, [role="button"], [role="tab"] { min-height: 2.75rem !important; }
+  [role="slider"] { min-width: 2.75rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -103,7 +112,7 @@ input[type="range"]::-webkit-slider-thumb {
   appearance: none;
   border: 2px solid var(--panel);
   border-radius: 9999px;
-  background: #4f46e5;
+  background: var(--accent);
   box-shadow: 0 0 0 1px rgb(79 70 229 / 35%);
 }
 input[type="range"]::-moz-range-track {
@@ -116,10 +125,57 @@ input[type="range"]::-moz-range-thumb {
   height: 1rem;
   border: 2px solid var(--panel);
   border-radius: 9999px;
-  background: #4f46e5;
+  background: var(--accent);
 }
 input[type="range"]:disabled::-webkit-slider-thumb,
 input[type="range"]:disabled::-moz-range-thumb { background: var(--muted); }
+
+/* Workspace resizers: visible handle with focus/hover affordance. */
+.workspace-resizer {
+  touch-action: none;
+  background: transparent;
+  transition: background-color 150ms ease;
+}
+.workspace-resizer-x {
+  width: 0.5rem;
+  cursor: col-resize;
+}
+.workspace-resizer-y {
+  height: 0.5rem;
+  cursor: row-resize;
+}
+.workspace-resizer::after {
+  content: "";
+  position: absolute;
+  border-radius: 9999px;
+  background: var(--border);
+  transition: background-color 150ms ease;
+}
+.workspace-resizer-x::after {
+  inset: 25% 50% 25% 50%;
+  width: 2px;
+  transform: translateX(-1px);
+}
+.workspace-resizer-y::after {
+  inset: 50% 25% 50% 25%;
+  height: 2px;
+  transform: translateY(-1px);
+}
+.workspace-resizer:hover::after,
+.workspace-resizer:focus-visible::after {
+  background: var(--resizer);
+}
+.workspace-resizer:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+/* Coarse pointers get a 44px timeline drag handle target. */
+@media (pointer: coarse) {
+  [data-drag-handle] {
+    min-width: 2.75rem;
+  }
+}
 
 .preview-canvas:fullscreen {
   width: 100vw;
@@ -135,16 +191,4 @@ input[type="range"]:disabled::-moz-range-thumb { background: var(--muted); }
   height: 100%;
   max-width: 100vw;
   max-height: 100vh;
-}
-
-@media (min-width: 64rem) {
-  .workspace-side-panel[data-maximized="true"] {
-    position: fixed !important;
-    inset: 0 !important;
-    z-index: 50 !important;
-    width: 100vw !important;
-    max-height: none !important;
-    transform: none !important;
-    border-radius: 0 !important;
-  }
 }

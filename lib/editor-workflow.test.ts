@@ -3,6 +3,7 @@ import { moveClipToIndex } from './editor-utils';
 import {
   backgroundAudioGainAtTime,
   inspectorTabForSelection,
+  resolveInspectorTabs,
   reorderTargetFromCenters,
   splitClipWithTransition,
   type EditorSelection,
@@ -89,5 +90,21 @@ describe('background audio preview gain', () => {
     expect(backgroundAudioGainAtTime(segment, 13)).toBeCloseTo(0.8);
     expect(backgroundAudioGainAtTime(segment, 15.5)).toBeCloseTo(0.4);
     expect(backgroundAudioGainAtTime(segment, 16)).toBe(0);
+  });
+});
+
+
+describe('contextual Inspector destinations', () => {
+  it.each<[EditorSelection, string[]]>([
+    [null, ['project', 'effects', 'subtitles']],
+    [{ kind: 'video', id: 'v1' }, ['clip', 'project', 'effects', 'subtitles']],
+    [{ kind: 'source-audio', id: 'v1' }, ['audio', 'project', 'effects', 'subtitles']],
+    [{ kind: 'background-audio', id: 'a2' }, ['audio', 'project', 'effects', 'subtitles']],
+    [{ kind: 'effect', id: 'filters:global' }, ['effects', 'project', 'subtitles']],
+    [{ kind: 'effect', id: 'overlay:shape1' }, ['subtitles', 'project', 'effects']],
+    [{ kind: 'subtitle', id: 's1' }, ['subtitles', 'project', 'effects']],
+    [{ kind: 'image', id: 'i1' }, ['subtitles', 'project', 'effects']],
+  ])('puts %j context first and removes irrelevant destinations', (selection, expected) => {
+    expect(resolveInspectorTabs(selection)).toEqual(expected);
   });
 });

@@ -51,7 +51,7 @@ const resources = {
       // Volume / mute / master
       volume: 'Volume', mute: 'Mute', unmute: 'Unmute', master_volume: 'Master volume', clip_volume: 'Clip volume',
       // Timeline zoom / playhead
-      zoom_in: 'Zoom in', zoom_out: 'Zoom out', zoom_fit: 'Fit all', timeline_playhead: 'Project playhead',
+      zoom_in: 'Zoom in', zoom_out: 'Zoom out', zoom_fit: 'Fit all', zoom_reset: 'Reset zoom', timeline_playhead: 'Project playhead',
       // Rotation / flip / aspect / fit / speed
       rotation: 'Rotation', flip_h: 'Flip horizontal', flip_v: 'Flip vertical',
       aspect: 'Aspect ratio', fit: 'Fit mode', speed: 'Speed',
@@ -166,6 +166,7 @@ const resources = {
       overlay_select: 'Select', overlay_pen: 'Pen', overlay_rect_tool: 'Rect',
       no_overlays: 'No overlays yet.',
       selected_overlay: 'Selected',
+      select_overlay_named: 'Select {{name}}',
       // Drawing tool
       drawing_mode: 'Drawing mode active. Draw on the preview.',
       rect_mode: 'Rectangle mode active. Drag on the preview.',
@@ -217,7 +218,7 @@ const resources = {
       // Volume / mute / master
       volume: '音量', mute: '静音', unmute: '取消静音', master_volume: '主音量', clip_volume: '片段音量',
       // Timeline zoom / playhead
-      zoom_in: '放大', zoom_out: '缩小', zoom_fit: '适应全部', timeline_playhead: '项目播放头',
+      zoom_in: '放大', zoom_out: '缩小', zoom_fit: '适应全部', zoom_reset: '重置缩放', timeline_playhead: '项目播放头',
       // Rotation / flip / aspect / fit / speed
       rotation: '旋转', flip_h: '水平翻转', flip_v: '垂直翻转',
       aspect: '画面比例', fit: '填充模式', speed: '速度',
@@ -332,6 +333,7 @@ const resources = {
       overlay_select: '选择', overlay_pen: '画笔', overlay_rect_tool: '矩形',
       no_overlays: '暂无标注。',
       selected_overlay: '已选中',
+      select_overlay_named: '选择{{name}}',
       // Drawing tool
       drawing_mode: '画笔模式已激活。在预览区域绘制。',
       rect_mode: '矩形模式已激活。在预览区域拖动。',

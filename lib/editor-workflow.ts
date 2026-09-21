@@ -24,6 +24,13 @@ export function inspectorTabForSelection(selection: EditorSelection): Contextual
   }
 }
 
+/** Keep global destinations stable while placing the selected material context first. */
+export function resolveInspectorTabs(selection: EditorSelection): ContextualInspectorTab[] {
+  const globalTabs: ContextualInspectorTab[] = ['project', 'effects', 'subtitles'];
+  const contextualTab = inspectorTabForSelection(selection);
+  return [contextualTab, ...globalTabs.filter((tab) => tab !== contextualTab)];
+}
+
 export interface ClipTransition {
   afterClipId: string;
 }

@@ -21,6 +21,20 @@ export function resizeWorkspacePanel(
   return clampWorkspaceSize(startSize + pointerDelta * direction, min, max);
 }
 
+export function stepTimelineZoom(current: number, direction: -1 | 1): number {
+  const safeCurrent = Number.isFinite(current) ? current : 1;
+  const next = safeCurrent + direction * 0.25;
+  return Math.max(0.3, Math.min(5, Math.round(next * 100) / 100));
+}
+
+export function formatEditorTime(seconds: number): string {
+  const safeSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  const totalTenths = Math.round(safeSeconds * 10);
+  const minutes = Math.floor(totalTenths / 600);
+  const remaining = (totalTenths % 600) / 10;
+  return `${minutes}:${remaining.toFixed(1).padStart(4, '0')}`;
+}
+
 /** Move a project-time range while preserving its duration. */
 export function moveTimedRange(
   startTime: number,
