@@ -6,6 +6,10 @@ import {
   resolveVisibleTimelineTracks,
   stepTimelineZoom,
   formatEditorTime,
+  clipPointerToSourceTime,
+  clampProjectItemStart,
+  hasPassedDragThreshold,
+  timelineSelectionState,
 } from './workspace-utils';
 
 describe('workspace sizing', () => {
@@ -98,5 +102,65 @@ describe('timeline presentation controls', () => {
     expect(formatEditorTime(600.04)).toBe('10:00.0');
     expect(formatEditorTime(-2)).toBe('0:00.0');
     expect(formatEditorTime(Number.NaN)).toBe('0:00.0');
+  });
+});
+
+
+describe('timeline pointer and boundary contract', () => {
+  it('maps V1 and A1 pointer positions through the same clamped source-time rule', () => {
+    expect(clipPointerToSourceTime(150, 100, 200, 10, 20)).toBe(12.5);
+    expect(clipPointerToSourceTime(50, 100, 200, 10, 20)).toBe(10);
+    expect(clipPointerToSourceTime(400, 100, 200, 10, 20)).toBe(20);
+    expect(clipPointerToSourceTime(150, 100, 0, 10, 20)).toBe(10);
+  });
+
+  it('clamps independent items to the editable project duration', () => {
+    expect(clampProjectItemStart(8, 3, 10)).toBe(7);
+    expect(clampProjectItemStart(-2, 3, 10)).toBe(0);
+    expect(clampProjectItemStart(4, 12, 10)).toBe(0);
+    expect(clampProjectItemStart(Number.NaN, 3, 10)).toBe(0);
+  });
+
+  it('starts drag only after the configured two-axis movement threshold', () => {
+    expect(hasPassedDragThreshold(10, 10, 15, 13, 6)).toBe(false);
+    expect(hasPassedDragThreshold(10, 10, 16, 10, 6)).toBe(true);
+    expect(hasPassedDragThreshold(10, 10, 14, 15, 6)).toBe(true);
+    expect(hasPassedDragThreshold(10, 10, Number.NaN, 20, 6)).toBe(false);
+  });
+});
+
+describe('timeline linked selection', () => {
+  const videoSelection = { track: 'video' as const, linkedTrack: 'source-audio' as const, id: 'clip-1' };
+  const subtitleSelection = { track: 'subtitle' as const, linkedTrack: 'tts' as const, id: 'cue-1' };
+
+  it('distinguishes the exact V1/A1 context from its linked counterpart', () => {
+    expect(timelineSelectionState(videoSelection, 'video', 'clip-1')).toBe('selected');
+    expect(timelineSelectionState(videoSelection, 'source-audio', 'clip-1')).toBe('linked');
+    expect(timelineSelectionState(videoSelection, 'source-audio', 'clip-2')).toBe('none');
+  });
+
+  it('co-selects A3/S1 only for the same shared cue', () => {
+    expect(timelineSelectionState(subtitleSelection, 'subtitle', 'cue-1')).toBe('selected');
+    expect(timelineSelectionState(subtitleSelection, 'tts', 'cue-1')).toBe('linked');
+    expect(timelineSelectionState(subtitleSelection, 'tts', 'cue-2')).toBe('none');
+    expect(timelineSelectionState(null, 'subtitle', 'cue-1')).toBe('none');
+  });
+});
+
+
+describe('complete timeline track stack', () => {
+  it('keeps the stable V/A/TTS/caption/image/effect order when all content exists', () => {
+    const tracks = resolveVisibleTimelineTracks({
+      hasVideo: true,
+      hasBackgroundAudio: true,
+      hasSubtitles: true,
+      hasTts: true,
+      hasImages: true,
+      hasEffects: true,
+    });
+    expect(tracks).toEqual([
+      'video', 'source-audio', 'background-audio', 'tts-audio', 'subtitle', 'image', 'effect',
+    ]);
+    expect(tracks).toHaveLength(7);
   });
 });

@@ -14,6 +14,10 @@
   --accent-strong: #4338ca;
   --focus-ring: #6366f1;
   --resizer: #6366f1;
+  /* Timeline selection: strong ring for the exact selected lane, softer ring
+     for a linked counterpart (V1/A1 pair, A3/S1 shared cue). */
+  --selection: #6366f1;
+  --linked-selection: #22d3ee;
 }
 
 .dark {
@@ -29,6 +33,8 @@
   --accent-strong: #818cf8;
   --focus-ring: #818cf8;
   --resizer: #818cf8;
+  --selection: #818cf8;
+  --linked-selection: #22d3ee;
 }
 
 * { box-sizing: border-box; }

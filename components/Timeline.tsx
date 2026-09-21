@@ -2,13 +2,23 @@
 
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link2, Lock } from 'lucide-react';
 import {
   projectTimeToPixel as computeProjectTimeToPixel,
   pixelToProjectTime as computePixelToProjectTime,
   type TimelineClipLayout,
 } from '@/lib/audio-track-utils';
 import { reorderTargetFromCenters } from '@/lib/editor-workflow';
-import { formatEditorTime, resolveVisibleTimelineTracks, stepTimelineZoom } from '@/lib/workspace-utils';
+import {
+  clipPointerToSourceTime,
+  formatEditorTime,
+  hasPassedDragThreshold,
+  resolveVisibleTimelineTracks,
+  stepTimelineZoom,
+  timelineSelectionState,
+  type TimelineSelection,
+  type TimelineSelectionTrack,
+} from '@/lib/workspace-utils';
 
 export interface TimelineItem {
   id: string;
@@ -36,6 +46,10 @@ export interface TimelineTimedItem {
   startTime: number;
   endTime: number;
   movable?: boolean;
+  /** Transient presentation only: cue timing is shared with another lane. */
+  linked?: boolean;
+  /** Transient presentation only: view item is fixed to project/clip structure. */
+  pinned?: boolean;
 }
 
 const PX_PER_SECOND = 14;
@@ -43,7 +57,7 @@ const CLIP_MIN_PX = 120;
 const CLIP_GAP_PX = 8;
 const SURFACE_PAD_PX = 8;
 /** Single source of truth for the sticky track-label gutter width. */
-export const TRACK_LABEL_PX = 76;
+export const TRACK_LABEL_PX = 112;
 
 function getPlaybackDuration(clip: TimelineItem) {
   return Math.max(0.01, (clip.trimEnd - clip.trimStart) / (clip.speed && clip.speed > 0 ? clip.speed : 1));
@@ -56,6 +70,8 @@ function getAudioSegmentDuration(segment: TimelineAudioSegment) {
 interface TimelineProps {
   clips: TimelineItem[];
   activeClipId: string | null;
+  /** Exact V1/A1 selection context; `linkedTrack` marks the counterpart lane. */
+  selectedClipItem?: { track: 'video' | 'source-audio'; linkedTrack?: 'video' | 'source-audio'; id: string } | null;
   currentTime: number;
   onSeek: (clipId: string, sourceTime: number) => void;
   onReorder: (clipId: string, targetIndex: number) => void;
@@ -76,7 +92,7 @@ interface TimelineProps {
   subtitleItems?: TimelineTimedItem[];
   imageItems?: TimelineTimedItem[];
   effectItems?: TimelineTimedItem[];
-  selectedTimedItem?: { track: TimelineTimedTrack; id: string } | null;
+  selectedTimedItem?: { track: TimelineTimedTrack; linkedTrack?: TimelineTimedTrack; id: string } | null;
   onSelectTimedItem?: (track: TimelineTimedTrack, id: string | null) => void;
   onTimedItemMove?: (track: TimelineTimedTrack, id: string, projectStart: number) => void;
   onTimedEditStart?: () => void;
@@ -84,7 +100,7 @@ interface TimelineProps {
 }
 
 export default function Timeline({
-  clips, activeClipId, currentTime, onSeek, onReorder, onSelectVideo, onSelectSourceAudio,
+  clips, activeClipId, selectedClipItem = null, currentTime, onSeek, onReorder, onSelectVideo, onSelectSourceAudio,
   collapsed = false, zoom = 1, onZoomChange,
   audioSegments = [], hasBackgroundAudioSource = false, selectedAudioSegmentId = null,
   onSelectAudioSegment, onAudioSegmentMove, onBackgroundAudioDrop, onAudioEditStart, onAudioEditEnd,
@@ -111,6 +127,36 @@ export default function Timeline({
     hasImages: imageItems.length > 0,
     hasEffects: effectItems.length > 0,
   });
+
+  // Selection descriptors feed the pure timelineSelectionState so every lane
+  // resolves 'selected' | 'linked' | 'none' through one contract. (Named without
+  // a "Ref" suffix so lint does not treat them as React refs.)
+  const clipSelection: TimelineSelection | null = selectedClipItem
+    ? { track: selectedClipItem.track, linkedTrack: selectedClipItem.linkedTrack, id: selectedClipItem.id }
+    : null;
+  const timedSelection: TimelineSelection | null = selectedTimedItem
+    ? {
+        track: selectedTimedItem.track as TimelineSelectionTrack,
+        linkedTrack: selectedTimedItem.linkedTrack as TimelineSelectionTrack | undefined,
+        id: selectedTimedItem.id,
+      }
+    : null;
+  // Resolve selection state once per item through the pure contract, keyed by
+  // track:id, so the render helpers read a plain lookup instead of calling a
+  // (ref-typed-argument) helper during render.
+  const timedSelectionStates = new Map<string, ReturnType<typeof timelineSelectionState>>();
+  for (const [tk, list] of [
+    ['tts', ttsItems], ['subtitle', subtitleItems], ['image', imageItems], ['effect', effectItems],
+  ] as const) {
+    for (const item of list) timedSelectionStates.set(`${tk}:${item.id}`, timelineSelectionState(timedSelection, tk as TimelineSelectionTrack, item.id));
+  }
+  const clipSelectionStates = new Map<string, { video: ReturnType<typeof timelineSelectionState>; source: ReturnType<typeof timelineSelectionState> }>();
+  for (const clip of clips) {
+    clipSelectionStates.set(clip.id, {
+      video: timelineSelectionState(clipSelection, 'video', clip.id),
+      source: timelineSelectionState(clipSelection, 'source-audio', clip.id),
+    });
+  }
   const clipLayout: TimelineClipLayout[] = clips.map((clip) => {
     const playbackDuration = getPlaybackDuration(clip);
     return { playbackDuration, clipPx: Math.max(CLIP_MIN_PX, playbackDuration * PX_PER_SECOND * zoom) };
@@ -165,8 +211,7 @@ export default function Timeline({
   const seekFromPointer = (event: MouseEvent<HTMLButtonElement>, clip: TimelineItem) => {
     if (suppressClipClickRef.current) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
-    onSeek(clip.id, clip.trimStart + ratio * (clip.trimEnd - clip.trimStart));
+    onSeek(clip.id, clipPointerToSourceTime(event.clientX, rect.left, rect.width, clip.trimStart, clip.trimEnd));
   };
 
   const handlePlayheadDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -187,7 +232,7 @@ export default function Timeline({
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointermove', onMove, { passive: false });
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
     onMove(event.nativeEvent as unknown as globalThis.PointerEvent);
@@ -223,7 +268,7 @@ export default function Timeline({
       autoFollowRef.current = true;
     };
     const onMove = (moveEvent: globalThis.PointerEvent) => {
-      if (!started && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 6) return;
+      if (!started && !hasPassedDragThreshold(startX, startY, moveEvent.clientX, moveEvent.clientY)) return;
       moveEvent.preventDefault();
       if (!started) {
         started = true;
@@ -252,55 +297,79 @@ export default function Timeline({
   }, [pixelToProjectTime]);
 
   const handleAudioDrag = useCallback((event: ReactPointerEvent<HTMLElement>, segment: TimelineAudioSegment) => {
-    if (!containerRef.current) return;
-    event.preventDefault();
+    if (!containerRef.current || event.button !== 0 || !event.isPrimary) return;
     event.stopPropagation();
     onSelectAudioSegment?.(segment.id);
     if (!onAudioSegmentMove) return;
-    setDraggingAudioId(segment.id);
-    autoFollowRef.current = false;
-    onAudioEditStart?.();
     const container = containerRef.current;
+    const startX = event.clientX;
+    const startY = event.clientY;
     const grabOffset = pointerProjectTime(event.clientX, container) - segment.projectStart;
+    let started = false;
     const onMove = (moveEvent: globalThis.PointerEvent) => {
+      // A click/tap stays a selection until the pointer crosses the threshold;
+      // only then do we open a continuous-edit history checkpoint.
+      if (!started) {
+        if (!hasPassedDragThreshold(startX, startY, moveEvent.clientX, moveEvent.clientY)) return;
+        started = true;
+        setDraggingAudioId(segment.id);
+        autoFollowRef.current = false;
+        onAudioEditStart?.();
+      }
+      moveEvent.preventDefault();
       onAudioSegmentMove(segment.id, Math.max(0, pointerProjectTime(moveEvent.clientX, container) - grabOffset));
     };
     const onUp = () => {
-      setDraggingAudioId(null);
-      autoFollowRef.current = true;
-      onAudioEditEnd?.();
+      if (started) {
+        setDraggingAudioId(null);
+        autoFollowRef.current = true;
+        onAudioEditEnd?.();
+      }
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointermove', onMove, { passive: false });
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
   }, [onAudioEditEnd, onAudioEditStart, onAudioSegmentMove, onSelectAudioSegment, pointerProjectTime]);
 
   const handleTimedDrag = useCallback((event: ReactPointerEvent<HTMLElement>, track: TimelineTimedTrack, item: TimelineTimedItem) => {
-    if (!containerRef.current) return;
-    event.preventDefault();
+    if (!containerRef.current || event.button !== 0 || !event.isPrimary) return;
     event.stopPropagation();
     onSelectTimedItem?.(track, item.id);
-    if (item.movable === false || !onTimedItemMove) return;
-    setDraggingTimedId(`${track}:${item.id}`);
-    autoFollowRef.current = false;
-    onTimedEditStart?.();
+    // Fixed/pinned items select only: never preventDefault or begin a drag.
+    if (item.movable === false || item.pinned || !onTimedItemMove) return;
     const container = containerRef.current;
     const grabOffset = pointerProjectTime(event.clientX, container) - item.startTime;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const dragKey = `${track}:${item.id}`;
+    let started = false;
     const onMove = (moveEvent: globalThis.PointerEvent) => {
+      // A click/tap stays a selection until the pointer crosses the 6px
+      // threshold; only then do we open a continuous-edit history checkpoint.
+      if (!started) {
+        if (!hasPassedDragThreshold(startX, startY, moveEvent.clientX, moveEvent.clientY)) return;
+        started = true;
+        setDraggingTimedId(dragKey);
+        autoFollowRef.current = false;
+        onTimedEditStart?.();
+      }
+      moveEvent.preventDefault();
       onTimedItemMove(track, item.id, Math.max(0, pointerProjectTime(moveEvent.clientX, container) - grabOffset));
     };
     const onUp = () => {
-      setDraggingTimedId(null);
-      autoFollowRef.current = true;
-      onTimedEditEnd?.();
+      if (started) {
+        setDraggingTimedId(null);
+        autoFollowRef.current = true;
+        onTimedEditEnd?.();
+      }
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointermove', onMove, { passive: false });
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
   }, [onSelectTimedItem, onTimedEditEnd, onTimedEditStart, onTimedItemMove, pointerProjectTime]);
@@ -347,21 +416,28 @@ export default function Timeline({
         {items.map((item) => {
           const left = projectTimeToPixel(item.startTime);
           const width = Math.max(44, projectTimeToPixel(item.endTime) - left);
-          const selected = selectedTimedItem?.track === track && selectedTimedItem.id === item.id;
+          const selectionState = timedSelectionStates.get(`${track}:${item.id}`) ?? 'none';
+          const fixed = item.movable === false || item.pinned === true;
+          const ringClass = selectionState === 'selected'
+            ? 'ring-2 ring-[var(--selection)]'
+            : selectionState === 'linked'
+              ? 'ring-2 ring-[var(--linked-selection)]'
+              : '';
+          const describedBy = fixed ? 'timeline-fixed-help' : item.linked ? 'timeline-linked-help' : 'timeline-timed-help';
           return (
             <button
               key={item.id}
               data-timeline-item
               type="button"
-              aria-pressed={selected}
+              aria-pressed={selectionState !== 'none'}
               aria-label={t('timeline_timed_label', { name: item.name, track: label, start: item.startTime.toFixed(2), duration: Math.max(0, item.endTime - item.startTime).toFixed(2) })}
-              aria-describedby="timeline-timed-help"
+              aria-describedby={describedBy}
               style={{ left: `${left}px`, width: `${width}px` }}
-              className={`absolute inset-y-0.5 flex touch-none items-center overflow-hidden rounded border px-2 text-left text-xs font-medium transition ${palette} ${item.movable === false ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'} ${selected ? 'ring-2 ring-white/60' : ''} ${draggingTimedId === `${track}:${item.id}` ? 'opacity-70' : ''}`}
+              className={`absolute inset-y-0.5 flex touch-none items-center gap-1 overflow-hidden rounded border px-2 text-left text-xs font-medium transition ${palette} ${fixed ? 'cursor-pointer border-dashed saturate-50' : 'cursor-grab active:cursor-grabbing'} ${ringClass} ${draggingTimedId === `${track}:${item.id}` ? 'opacity-70' : ''}`}
               onPointerDown={(event) => handleTimedDrag(event, track, item)}
               onClick={(event) => { event.stopPropagation(); onSelectTimedItem?.(track, item.id); }}
               onKeyDown={(event) => {
-                if (item.movable === false || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+                if (fixed || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
                 event.preventDefault();
                 event.stopPropagation();
                 onTimedEditStart?.();
@@ -369,8 +445,12 @@ export default function Timeline({
                 onTimedItemMove?.(track, item.id, Math.max(0, item.startTime + direction * (event.shiftKey ? 1 : 0.1)));
               }}
               onBlur={() => onTimedEditEnd?.()}
-              title={item.name}
-            ><span className="truncate">{item.name}</span></button>
+              title={fixed ? `${item.name} · ${t('fixed_not_movable')}` : item.linked ? `${item.name} · ${t('linked_timing')}` : item.name}
+            >
+              {fixed && <Lock className="h-3 w-3 shrink-0 opacity-80" aria-hidden="true" />}
+              {!fixed && item.linked && <Link2 className="h-3 w-3 shrink-0 opacity-80" aria-hidden="true" />}
+              <span className="truncate">{item.name}</span>
+            </button>
           );
         })}
       </div>
@@ -404,6 +484,12 @@ export default function Timeline({
           {clips.map((clip, index) => {
             const duration = getPlaybackDuration(clip);
             const active = activeClipId === clip.id;
+            const state = clipSelectionStates.get(clip.id)?.video ?? 'none';
+            const ringClass = state === 'selected'
+              ? 'ring-2 ring-[var(--selection)]'
+              : state === 'linked'
+                ? 'ring-2 ring-[var(--linked-selection)]'
+                : '';
             return (
               <div key={clip.id} data-clip-id={clip.id} role="listitem" className={`relative shrink-0 rounded-md ${dropIndex === index && draggedId !== clip.id ? 'ring-2 ring-indigo-400' : ''}`} style={{ width: `${Math.max(CLIP_MIN_PX, duration * PX_PER_SECOND * zoom)}px` }}>
                 <button
@@ -418,8 +504,9 @@ export default function Timeline({
                     onReorder(clip.id, index + (event.key === 'ArrowLeft' ? -1 : 1));
                   }}
                   aria-current={active ? 'true' : undefined}
+                  aria-pressed={state !== 'none'}
                   aria-label={t('timeline_clip_label', { name: clip.name, index: index + 1, total: clips.length, duration: duration.toFixed(2) })}
-                  className={`relative h-12 w-full touch-pan-x cursor-grab overflow-hidden rounded-md border bg-[var(--raised)] text-left transition active:cursor-grabbing ${active ? 'border-indigo-500' : 'border-[var(--border)] hover:border-indigo-400'} ${draggedId === clip.id ? 'opacity-50' : ''}`}
+                  className={`relative h-12 w-full touch-pan-x cursor-grab overflow-hidden rounded-md border bg-[var(--raised)] text-left transition active:cursor-grabbing ${active ? 'border-indigo-500' : 'border-[var(--border)] hover:border-indigo-400'} ${ringClass} ${draggedId === clip.id ? 'opacity-50' : ''}`}
                 >
                   <span data-drag-handle className="absolute inset-y-0 left-0 z-10 flex w-6 touch-none items-center justify-center text-xs text-[var(--muted)]" aria-hidden="true">⠿</span>
                   <span className="absolute inset-0 bg-gradient-to-r from-indigo-500/15 via-transparent to-cyan-500/10" />
@@ -439,18 +526,27 @@ export default function Timeline({
             {clips.map((clip, index) => {
               const duration = getPlaybackDuration(clip);
               const muted = clip.muted === true || (clip.volume ?? 100) <= 0;
+              const state = clipSelectionStates.get(clip.id)?.source ?? 'none';
+              const ringClass = state === 'selected'
+                ? 'ring-2 ring-[var(--selection)]'
+                : state === 'linked'
+                  ? 'ring-2 ring-[var(--linked-selection)]'
+                  : activeClipId === clip.id ? 'ring-1 ring-amber-300/60' : '';
               return (
                 <button
                   key={clip.id}
                   data-clip-id={clip.id}
                   type="button"
                   data-timeline-item
+                  aria-pressed={state !== 'none'}
+                  aria-current={activeClipId === clip.id ? 'true' : undefined}
                   aria-label={t('timeline_source_audio_label', { name: clip.name, volume: clip.volume ?? 100, state: muted ? t('muted_state') : t('audible_state') })}
+                  aria-describedby="timeline-linked-help"
                   title={`${clip.name} · ${t('linked_to_video')} · ${muted ? t('muted_state') : `${clip.volume ?? 100}%`}`}
                   style={{ width: `${Math.max(CLIP_MIN_PX, duration * PX_PER_SECOND * zoom)}px` }}
-                  className={`relative h-11 touch-pan-x shrink-0 cursor-grab overflow-hidden rounded border pl-7 pr-2 text-left text-xs transition active:cursor-grabbing ${activeClipId === clip.id ? 'border-amber-300 ring-1 ring-amber-300/60' : 'border-amber-600/50 hover:border-amber-400'} ${muted ? 'bg-amber-950/20 text-amber-200/45' : 'bg-gradient-to-r from-amber-500/30 via-orange-500/20 to-amber-500/30 text-amber-100'} ${draggedId === clip.id ? 'opacity-50' : ''} ${dropIndex === index && draggedId !== clip.id ? 'ring-2 ring-indigo-400' : ''}`}
+                  className={`relative h-11 touch-pan-x shrink-0 cursor-grab overflow-hidden rounded border pl-7 pr-2 text-left text-xs transition active:cursor-grabbing ${activeClipId === clip.id ? 'border-amber-300' : 'border-amber-600/50 hover:border-amber-400'} ${muted ? 'bg-amber-950/20 text-amber-200/45' : 'bg-gradient-to-r from-amber-500/30 via-orange-500/20 to-amber-500/30 text-amber-100'} ${ringClass} ${draggedId === clip.id ? 'opacity-50' : ''} ${dropIndex === index && draggedId !== clip.id ? 'ring-2 ring-indigo-400' : ''}`}
                   onPointerDown={(event) => handleClipPointerDown(event, clip.id)}
-                  onClick={() => { if (suppressClipClickRef.current) return; onSelectSourceAudio?.(clip.id); onSeek(clip.id, clip.trimStart); }}
+                  onClick={(event) => { if (suppressClipClickRef.current) return; onSelectSourceAudio?.(clip.id); const rect = event.currentTarget.getBoundingClientRect(); onSeek(clip.id, clipPointerToSourceTime(event.clientX, rect.left, rect.width, clip.trimStart, clip.trimEnd)); }}
                   onKeyDown={(event) => {
                     if (!event.altKey || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
                     event.preventDefault();
@@ -460,7 +556,7 @@ export default function Timeline({
                 >
                   <span data-drag-handle className="absolute inset-y-0 left-0 z-10 flex w-6 touch-none items-center justify-center text-xs opacity-70" aria-hidden="true">⠿</span>
                   <span className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-current opacity-30" aria-hidden="true" />
-                  <span className="relative flex items-center justify-between gap-2"><span className="truncate">{clip.name}</span><span className="shrink-0 font-mono">{muted ? t('muted_state') : `${clip.volume ?? 100}%`}</span></span>
+                  <span className="relative flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-1"><Link2 className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" /><span className="truncate">{clip.name}</span></span><span className="shrink-0 font-mono">{muted ? t('muted_state') : `${clip.volume ?? 100}%`}</span></span>
                 </button>
               );
             })}
@@ -489,7 +585,7 @@ export default function Timeline({
               const width = Math.max(44, projectTimeToPixel(segment.projectStart + duration) - left);
               const selected = selectedAudioSegmentId === segment.id;
               return (
-                <button key={segment.id} data-timeline-item type="button" aria-pressed={selected} aria-label={t('timeline_audio_label', { name: segment.name, start: segment.projectStart.toFixed(2), duration: duration.toFixed(2) })} aria-describedby="timeline-audio-help" title={segment.name} style={{ left: `${left}px`, width: `${width}px` }} className={`absolute inset-y-0.5 flex cursor-grab touch-none items-center overflow-hidden rounded border bg-gradient-to-r from-emerald-500/35 to-teal-500/20 px-2 text-left text-xs font-medium text-emerald-100 transition active:cursor-grabbing ${selected ? 'border-emerald-300 ring-2 ring-emerald-300/60' : 'border-emerald-600/50 hover:border-emerald-400'} ${draggingAudioId === segment.id ? 'opacity-70' : ''}`} onPointerDown={(event) => handleAudioDrag(event, segment)} onClick={(event) => { event.stopPropagation(); onSelectAudioSegment?.(segment.id); }} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.stopPropagation(); onAudioEditStart?.(); onAudioSegmentMove?.(segment.id, Math.max(0, segment.projectStart + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1))); }} onBlur={() => onAudioEditEnd?.()}><span className="truncate">{segment.name}</span></button>
+                <button key={segment.id} data-timeline-item type="button" aria-pressed={selected} aria-label={t('timeline_audio_label', { name: segment.name, start: segment.projectStart.toFixed(2), duration: duration.toFixed(2) })} aria-describedby="timeline-audio-help" title={segment.name} style={{ left: `${left}px`, width: `${width}px` }} className={`absolute inset-y-0.5 flex cursor-grab touch-none items-center overflow-hidden rounded border bg-gradient-to-r from-emerald-500/35 to-teal-500/20 px-2 text-left text-xs font-medium text-emerald-100 transition active:cursor-grabbing ${selected ? 'border-emerald-300 ring-2 ring-[var(--selection)]' : 'border-emerald-600/50 hover:border-emerald-400'} ${draggingAudioId === segment.id ? 'opacity-70' : ''}`} onPointerDown={(event) => handleAudioDrag(event, segment)} onClick={(event) => { event.stopPropagation(); onSelectAudioSegment?.(segment.id); }} onKeyDown={(event) => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); event.stopPropagation(); onAudioEditStart?.(); onAudioSegmentMove?.(segment.id, Math.max(0, segment.projectStart + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 1 : 0.1))); }} onBlur={() => onAudioEditEnd?.()}><span className="truncate">{segment.name}</span></button>
               );
             })}
           </div>
@@ -502,6 +598,8 @@ export default function Timeline({
       {visibleTracks.includes('effect') && renderTimedTrack('effect', 'FX', t('effect_track'), effectItems, 'border-violet-500/60 bg-violet-500/25 text-violet-100 hover:border-violet-300')}
       <span id="timeline-audio-help" className="sr-only">{t('timeline_audio_help')}</span>
       <span id="timeline-timed-help" className="sr-only">{t('timeline_timed_help')}</span>
+      <span id="timeline-linked-help" className="sr-only">{t('linked_timing_help')}</span>
+      <span id="timeline-fixed-help" className="sr-only">{t('fixed_item_help')}</span>
     </div>
   );
 }

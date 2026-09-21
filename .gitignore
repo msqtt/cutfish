@@ -8,3 +8,4 @@ coverage/
 *.tsbuildinfo
 # Local Netlify folder
 .netlify
+.kiro/

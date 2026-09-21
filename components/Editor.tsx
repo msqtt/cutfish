@@ -53,7 +53,7 @@ import {
   rebaseDrawingPoints, getActiveTtsCue, computeOverlayCssTransform,
 } from '@/lib/visual-overlay-utils';
 import { renderOverlaysToPng } from '@/lib/overlay-renderer';
-import { clampWorkspaceSize, formatEditorTime, moveTimedRange, resizeWorkspacePanel, stepTimelineZoom } from '@/lib/workspace-utils';
+import { clampProjectItemStart, clampWorkspaceSize, formatEditorTime, moveTimedRange, resizeWorkspacePanel, resolveVisibleTimelineTracks, stepTimelineZoom } from '@/lib/workspace-utils';
 import { getFfmpegCoreAssetUrls } from '@/lib/ffmpeg-runtime';
 import '@/lib/i18n';
 
@@ -265,6 +265,9 @@ export default function Editor() {
   const [draftReady, setDraftReady] = useState(false);
   const [importProgress, setImportProgress] = useState<{ current: number; total: number; name: string } | null>(null);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
+  // Tracks the compact (< lg) layout where the Inspector lives in a bottom
+  // sheet. Explicit timeline "Add" actions only reveal it on compact layouts.
+  const [isCompactLayout, setIsCompactLayout] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -317,6 +320,7 @@ export default function Editor() {
   const backgroundAudioPoolRef = useRef(new Map<string, HTMLAudioElement>());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const timelineAddRef = useRef<HTMLDetailsElement>(null);
   const exportDialogRef = useRef<HTMLDivElement>(null);
   const exportTriggerRef = useRef<HTMLButtonElement>(null);
   const helpTriggerRef = useRef<HTMLButtonElement>(null);
@@ -383,12 +387,13 @@ export default function Editor() {
   const timelineSubtitleItems: TimelineTimedItem[] = state.subtitles.map((cue, index) => ({
     id: cue.id, name: cue.text.trim() || `${t('subtitles')} ${index + 1}`,
     startTime: cue.startTime, endTime: cue.endTime,
+    linked: Boolean(cue.tts?.enabled && cue.text.trim()),
   }));
   const timelineTtsItems: TimelineTimedItem[] = state.subtitles
     .filter((cue) => cue.tts?.enabled && cue.text.trim())
     .map((cue, index) => ({
       id: cue.id, name: cue.text.trim() || `${t('tts_audio_track')} ${index + 1}`,
-      startTime: cue.startTime, endTime: cue.endTime,
+      startTime: cue.startTime, endTime: cue.endTime, linked: true,
     }));
   const timelineImageItems: TimelineTimedItem[] = state.visualOverlays.filter((overlay) => overlay.type === 'image').map((overlay, index) => ({
     id: overlay.id, name: `${t('image_track')} ${index + 1}`,
@@ -405,22 +410,49 @@ export default function Editor() {
       startTime: overlay.startTime, endTime: overlay.endTime,
     })),
     ...(filtersActive && projectDurationSpeedAware > 0 ? [{
-      id: 'filters:global', name: t('filters'), startTime: 0, endTime: projectDurationSpeedAware, movable: false,
+      id: 'filters:global', name: t('filters'), startTime: 0, endTime: projectDurationSpeedAware, movable: false, pinned: true,
     }] : []),
     ...state.transitions.flatMap((transition) => {
       const clipIndex = state.clips.findIndex((clip) => clip.id === transition.afterClipId);
       if (clipIndex < 0) return [];
       const boundary = state.clips.slice(0, clipIndex + 1).reduce((sum, clip) => sum + Math.max(0.01, (clip.trimEnd - clip.trimStart) / (clip.speed || 1)), 0);
-      return [{ id: `transition:${transition.afterClipId}`, name: t(`transition_${transition.type}`), startTime: Math.max(0, boundary - transition.duration), endTime: boundary, movable: false }];
+      return [{ id: `transition:${transition.afterClipId}`, name: t(`transition_${transition.type}`), startTime: Math.max(0, boundary - transition.duration), endTime: boundary, movable: false, pinned: true }];
     }),
   ];
   const selectedTimelineItem = selection?.kind === 'subtitle'
-    ? { track: selectedSubtitleTrack as TimelineTimedTrack, id: selection.id }
+    ? {
+        track: selectedSubtitleTrack as TimelineTimedTrack,
+        // A TTS-enabled cue shares timing across S1 and A3, so highlight the
+        // counterpart lane with the linked treatment.
+        linkedTrack: (state.subtitles.find((cue) => cue.id === selection.id)?.tts?.enabled
+          ? (selectedSubtitleTrack === 'subtitle' ? 'tts' : 'subtitle')
+          : undefined) as TimelineTimedTrack | undefined,
+        id: selection.id,
+      }
     : selection?.kind === 'image'
       ? { track: 'image' as const, id: selection.id }
       : selection?.kind === 'effect'
         ? { track: 'effect' as const, id: selection.id }
         : null;
+
+  // Exact V1/A1 selection: the selected lane is primary; its clip-pair
+  // counterpart shows the linked treatment. activeClipId stays the playhead.
+  const selectedClipTimelineItem = selection?.kind === 'video'
+    ? { track: 'video' as const, linkedTrack: 'source-audio' as const, id: selection.id }
+    : selection?.kind === 'source-audio'
+      ? { track: 'source-audio' as const, linkedTrack: 'video' as const, id: selection.id }
+      : null;
+
+  // Truthful visible-track count for the timeline toolbar title; mirrors the
+  // same content-driven rule the Timeline uses to render lanes.
+  const visibleTimelineTrackCount = resolveVisibleTimelineTracks({
+    hasVideo: state.clips.length > 0,
+    hasBackgroundAudio: Boolean(state.backgroundMusic) || (state.backgroundMusic?.segments.length ?? 0) > 0,
+    hasSubtitles: timelineSubtitleItems.length > 0,
+    hasTts: timelineTtsItems.length > 0,
+    hasImages: timelineImageItems.length > 0,
+    hasEffects: timelineEffectItems.length > 0,
+  }).length;
 
   // Contextual Inspector destinations: selected material first, then the stable
   // global destinations, capped at four (derived, never persisted).
@@ -457,6 +489,18 @@ export default function Editor() {
   useEffect(() => {
     document.documentElement.lang = i18n.resolvedLanguage?.startsWith('zh') ? 'zh-CN' : 'en';
   }, [i18n.resolvedLanguage]);
+
+  // Mirror the Tailwind `lg` breakpoint (1024px) that hides the docked panels
+  // and shows the mobile bottom sheet, so timeline Add actions know when to
+  // reveal the Inspector explicitly.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const query = window.matchMedia('(max-width: 1023px)');
+    const sync = () => setIsCompactLayout(query.matches);
+    sync();
+    query.addEventListener('change', sync);
+    return () => query.removeEventListener('change', sync);
+  }, []);
 
   useEffect(() => {
     backgroundAudioPoolRef.current.forEach((audio) => audio.pause());
@@ -635,18 +679,34 @@ export default function Editor() {
   const moveTimelineTimedItem = useCallback((track: TimelineTimedTrack, id: string, targetStart: number) => {
     replaceState((current) => {
       const duration = getProjectDurationSpeedAware(current.clips);
-      if (track === 'subtitle' || track === 'tts') return {
-        ...current,
-        subtitles: current.subtitles.map((cue) => cue.id === id ? { ...cue, ...moveTimedRange(cue.startTime, cue.endTime, targetStart, duration) } : cue),
-      };
+      if (track === 'subtitle' || track === 'tts') {
+        const cue = current.subtitles.find((c) => c.id === id);
+        if (!cue) return current;
+        const moved = moveTimedRange(cue.startTime, cue.endTime, targetStart, duration);
+        if (moved.startTime === cue.startTime) return current;
+        return {
+          ...current,
+          subtitles: current.subtitles.map((c) => c.id === id ? { ...c, ...moved } : c),
+        };
+      }
       const rawId = id.startsWith('text:') ? id.slice(5) : id.startsWith('overlay:') ? id.slice(8) : id;
-      if (track === 'effect' && id.startsWith('text:')) return {
-        ...current,
-        textOverlays: current.textOverlays.map((overlay) => overlay.id === rawId ? { ...overlay, ...moveTimedRange(overlay.startTime, overlay.endTime, targetStart, duration) } : overlay),
-      };
+      if (track === 'effect' && id.startsWith('text:')) {
+        const overlay = current.textOverlays.find((o) => o.id === rawId);
+        if (!overlay) return current;
+        const moved = moveTimedRange(overlay.startTime, overlay.endTime, targetStart, duration);
+        if (moved.startTime === overlay.startTime) return current;
+        return {
+          ...current,
+          textOverlays: current.textOverlays.map((o) => o.id === rawId ? { ...o, ...moved } : o),
+        };
+      }
+      const overlay = current.visualOverlays.find((o) => o.id === rawId);
+      if (!overlay) return current;
+      const moved = moveTimedRange(overlay.startTime, overlay.endTime, targetStart, duration);
+      if (moved.startTime === overlay.startTime) return current;
       return {
         ...current,
-        visualOverlays: current.visualOverlays.map((overlay) => overlay.id === rawId ? { ...overlay, ...moveTimedRange(overlay.startTime, overlay.endTime, targetStart, duration) } as VisualOverlay : overlay),
+        visualOverlays: current.visualOverlays.map((o) => o.id === rawId ? { ...o, ...moved } as VisualOverlay : o),
       };
     });
   }, [replaceState]);
@@ -919,7 +979,7 @@ export default function Editor() {
       const track = current.backgroundMusic;
       if (!track || track.duration <= 0) return current;
       const projectDuration = getProjectDurationSpeedAware(current.clips);
-      const projectStart = Math.max(0, Math.min(requestedStart, projectDuration || requestedStart));
+      const projectStart = clampProjectItemStart(requestedStart, track.duration, projectDuration);
       const segment: AudioTrackSegment = {
         id,
         projectStart,
@@ -960,10 +1020,17 @@ export default function Editor() {
    * (see beginContinuousEdit/finishContinuousEdit wired on the Timeline).
    */
   const moveAudioSegment = useCallback((segmentId: string, projectStart: number) => {
-    const next = Math.max(0, Number.isFinite(projectStart) ? projectStart : 0);
     replaceState((current) => {
       const track = current.backgroundMusic;
       if (!track) return current;
+      const segment = track.segments.find((s) => s.id === segmentId);
+      if (!segment) return current;
+      const segmentDuration = Math.max(0, segment.trimEnd - segment.trimStart);
+      const projectDuration = getProjectDurationSpeedAware(current.clips);
+      const next = clampProjectItemStart(projectStart, segmentDuration, projectDuration);
+      // Boundary no-ops keep the current React state object so continuous drags
+      // against the edge do not churn history or trigger renders.
+      if (next === segment.projectStart) return current;
       const segments = track.segments.map((s) =>
         s.id === segmentId ? { ...s, projectStart: next } : s,
       );
@@ -984,11 +1051,24 @@ export default function Editor() {
     replaceState((current) => {
       const track = current.backgroundMusic;
       if (!track) return current;
-      const segments = track.segments.map((s) =>
-        s.id === segmentId
-          ? clampAudioSegmentToSource({ ...s, ...patch }, track.duration || (s.trimEnd || 0.01))
-          : s,
-      );
+      const projectDuration = getProjectDurationSpeedAware(current.clips);
+      let changed = false;
+      const segments = track.segments.map((s) => {
+        if (s.id !== segmentId) return s;
+        const sourceClamped = clampAudioSegmentToSource({ ...s, ...patch }, track.duration || (s.trimEnd || 0.01));
+        const next = {
+          ...sourceClamped,
+          projectStart: clampProjectItemStart(
+            sourceClamped.projectStart,
+            Math.max(0, sourceClamped.trimEnd - sourceClamped.trimStart),
+            projectDuration,
+          ),
+        };
+        if (next.projectStart === s.projectStart && next.trimStart === s.trimStart && next.trimEnd === s.trimEnd && next.volume === s.volume && next.fadeIn === s.fadeIn && next.fadeOut === s.fadeOut) return s;
+        changed = true;
+        return next;
+      });
+      if (!changed) return current;
       return { ...current, backgroundMusic: { ...track, segments } };
     });
   }, [replaceState]);
@@ -1016,12 +1096,21 @@ export default function Editor() {
         replaceState((current) => {
           const cur = current.backgroundMusic;
           if (!cur || cur.duration > 0) return current;
-          const segments = cur.segments.map((s) =>
-            clampAudioSegmentToSource(
+          const projectDuration = getProjectDurationSpeedAware(current.clips);
+          const segments = cur.segments.map((s) => {
+            const sourceClamped = clampAudioSegmentToSource(
               { ...s, trimEnd: s.trimEnd > 0 ? s.trimEnd : duration },
               duration,
-            ),
-          );
+            );
+            return {
+              ...sourceClamped,
+              projectStart: clampProjectItemStart(
+                sourceClamped.projectStart,
+                Math.max(0, sourceClamped.trimEnd - sourceClamped.trimStart),
+                projectDuration,
+              ),
+            };
+          });
           return { ...current, backgroundMusic: { ...cur, duration, segments } };
         });
       })
@@ -1795,6 +1884,7 @@ export default function Editor() {
   // ─── Text Overlay CRUD ───────────────────────────────────────────────────
 
   const addTextOverlay = useCallback(() => {
+    const startTime = Math.max(0, Math.min(previewProjectTime, Math.max(0, projectDurationSpeedAware - 0.01)));
     const overlay: TextOverlay = {
       id: crypto.randomUUID(),
       text: 'Text',
@@ -1802,15 +1892,15 @@ export default function Editor() {
       fontSize: 48,
       color: '#ffffff',
       position: { x: 50, y: 50 },
-      startTime: 0,
-      endTime: Math.min(5, projectDurationSpeedAware),
+      startTime,
+      endTime: Math.min(projectDurationSpeedAware, startTime + 5),
     };
     updateState((current) => ({
       ...current,
       textOverlays: [...current.textOverlays, overlay],
     }));
     selectEditorItem({ kind: 'effect', id: `text:${overlay.id}` });
-  }, [projectDurationSpeedAware, selectEditorItem, updateState]);
+  }, [previewProjectTime, projectDurationSpeedAware, selectEditorItem, updateState]);
 
   const updateTextOverlay = useCallback((id: string, updates: Partial<TextOverlay>) => {
     replaceState((current) => ({
@@ -1837,6 +1927,26 @@ export default function Editor() {
     }));
     selectEditorItem({ kind: 'subtitle', id: cue.id });
   }, [previewProjectTime, selectEditorItem, updateState]);
+
+  // Timeline "Add" disclosure: reuse the existing creation/import paths at the
+  // current playhead, then reveal the Inspector only on compact layouts where
+  // it is otherwise hidden in a bottom sheet.
+  const revealInspectorIfCompact = useCallback(() => {
+    if (isCompactLayout) openMobilePanel('inspector');
+  }, [isCompactLayout, openMobilePanel]);
+  const timelineAddCaption = useCallback(() => { addSubtitle(); revealInspectorIfCompact(); }, [addSubtitle, revealInspectorIfCompact]);
+  const timelineAddText = useCallback(() => { addTextOverlay(); revealInspectorIfCompact(); }, [addTextOverlay, revealInspectorIfCompact]);
+  const timelineAddImage = useCallback(() => { imageInputRef.current?.click(); revealInspectorIfCompact(); }, [revealInspectorIfCompact]);
+  // Native <details> disclosure: close it after an action so it never lingers.
+  const closeTimelineAdd = useCallback(() => { if (timelineAddRef.current) timelineAddRef.current.open = false; }, []);
+  useEffect(() => {
+    const handleTimelineAddOutside = (event: PointerEvent) => {
+      const disclosure = timelineAddRef.current;
+      if (disclosure?.open && !disclosure.contains(event.target as Node)) disclosure.open = false;
+    };
+    window.addEventListener('pointerdown', handleTimelineAddOutside);
+    return () => window.removeEventListener('pointerdown', handleTimelineAddOutside);
+  }, []);
 
   const updateSubtitle = useCallback((id: string, updates: Partial<SubtitleCue>) => {
     replaceState((current) => ({
@@ -2827,7 +2937,7 @@ export default function Editor() {
                       {selectedSegment && (
                         <div className="space-y-4 rounded border border-emerald-500/30 bg-emerald-500/5 p-2.5" aria-label={t('selected_segment')}>
                           <p className="text-xs font-semibold text-[var(--text)]">{t('selected_segment')}</p>
-                          <RangeControl label={t('audio_project_start')} value={selectedSegment.projectStart} min={0} max={Math.max(projectDurationSpeedAware, selectedSegment.projectStart, 1)} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { projectStart: Math.max(0, v) })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
+                          <RangeControl label={t('audio_project_start')} value={selectedSegment.projectStart} min={0} max={Math.max(0, projectDurationSpeedAware - Math.max(0, selectedSegment.trimEnd - selectedSegment.trimStart))} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { projectStart: clampProjectItemStart(v, Math.max(0, selectedSegment.trimEnd - selectedSegment.trimStart), projectDurationSpeedAware) })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                           <RangeControl label={t('audio_trim_start')} value={selectedSegment.trimStart} min={0} max={Math.max(0, sourceDuration - 0.01)} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { trimStart: Math.min(v, selectedSegment.trimEnd - 0.01) })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                           <RangeControl label={t('audio_trim_end')} value={selectedSegment.trimEnd} min={selectedSegment.trimStart + 0.01} max={sourceDuration} step={0.1} unit="s" onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { trimEnd: Math.max(v, selectedSegment.trimStart + 0.01) })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
                           <RangeControl label={t('audio_volume')} value={selectedSegment.volume} min={0} max={200} onChange={(v) => editAudioSegmentTransient(selectedSegment.id, { volume: v })} onEditStart={beginContinuousEdit} onEditEnd={finishContinuousEdit} />
@@ -3143,12 +3253,24 @@ export default function Editor() {
           <button onClick={() => setTimelineCollapsed(!timelineCollapsed)} className={iconButton} aria-label={timelineCollapsed ? t('expand_timeline') : t('collapse_timeline')}>
             {timelineCollapsed ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           </button>
-          <span><strong className="text-[var(--text)]">V1</strong> {t('video_track')}</span>
-          <span className="hidden sm:inline"><strong className="text-[var(--text)]">A1</strong> {t('source_audio_track')}</span>
+          <span className="min-w-0 truncate font-medium text-[var(--text)]">{t('project_timeline')}</span>
+          <span className="hidden sm:inline">{t('timeline_track_count', { count: visibleTimelineTrackCount })}</span>
+          {!timelineCollapsed && state.clips.length > 0 && (
+            <details ref={timelineAddRef} className="relative" onKeyDown={(event) => { if (event.key === 'Escape' && event.currentTarget.open) { event.preventDefault(); event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); } }}>
+              <summary className={`${iconButton} list-none gap-1 px-2 [&::-webkit-details-marker]:hidden`} aria-label={t('timeline_add_menu')} title={t('timeline_add_menu')}>
+                <Plus className="h-3.5 w-3.5" /><span className="hidden sm:inline">{t('timeline_add')}</span>
+              </summary>
+              <div className="absolute left-0 top-full z-50 mt-1 flex min-w-36 flex-col rounded-md border border-[var(--border)] bg-[var(--panel)] py-1 shadow-xl">
+                <button type="button" onClick={() => { timelineAddCaption(); closeTimelineAdd(); }} className="flex items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-[var(--raised)]"><Plus className="h-3 w-3 shrink-0" aria-hidden="true" />{t('add_caption')}</button>
+                <button type="button" onClick={() => { timelineAddText(); closeTimelineAdd(); }} className="flex items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-[var(--raised)]"><Plus className="h-3 w-3 shrink-0" aria-hidden="true" />{t('add_text_item')}</button>
+                <button type="button" onClick={() => { timelineAddImage(); closeTimelineAdd(); }} className="flex items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-[var(--raised)]"><Plus className="h-3 w-3 shrink-0" aria-hidden="true" />{t('add_image_item')}</button>
+              </div>
+            </details>
+          )}
           {!timelineCollapsed && <button type="button" onClick={splitAtPlayhead} disabled={!canContextSplit} className={`${iconButton} gap-1 px-2`} title={canContextSplit ? t('split_at_playhead') : t('split_unavailable')}><Scissors className="h-3.5 w-3.5" /><span className="hidden sm:inline">{t('cut')}</span></button>}
           <span className="ml-auto hidden font-mono sm:inline">{formatEditorTime(previewProjectTime)} / {formatEditorTime(projectDurationSpeedAware)}{state.transitions.length > 0 && outputDuration < projectDurationSpeedAware - 0.01 ? ` · ${t('output_duration', { value: outputDuration.toFixed(1) })}` : ''}</span>
           {/* Zoom controls — one 0.25 step for buttons; Ctrl/Meta+wheel matches */}
-          <div className="flex items-center gap-0.5">
+          <div className="hidden items-center gap-0.5 sm:flex">
             <button onClick={() => setTimelineZoom((z) => stepTimelineZoom(z, -1))} className={iconButton} aria-label={t('zoom_out')} title={t('zoom_out')}><ZoomOut className="h-3.5 w-3.5" /></button>
             <button onClick={() => setTimelineZoom(1)} className="rounded px-1.5 py-0.5 text-xs font-mono hover:bg-[var(--raised)]" aria-label={t('zoom_reset')} title={t('zoom_reset')}>{(timelineZoom * 100).toFixed(0)}%</button>
             <button onClick={() => setTimelineZoom((z) => stepTimelineZoom(z, 1))} className={iconButton} aria-label={t('zoom_in')} title={t('zoom_in')}><ZoomIn className="h-3.5 w-3.5" /></button>
@@ -3159,6 +3281,7 @@ export default function Editor() {
             <Timeline
               clips={state.clips.map((c) => ({ id: c.id, name: c.displayName, trimStart: c.trimStart, trimEnd: c.trimEnd, speed: c.speed, volume: c.volume, muted: c.muted }))}
               activeClipId={state.activeClipId}
+              selectedClipItem={selectedClipTimelineItem}
               currentTime={currentTime}
               onSeek={seekTimeline}
               onReorder={reorderClip}

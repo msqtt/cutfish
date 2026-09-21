@@ -35,6 +35,57 @@ export function formatEditorTime(seconds: number): string {
   return `${minutes}:${remaining.toFixed(1).padStart(4, '0')}`;
 }
 
+export function clipPointerToSourceTime(
+  clientX: number,
+  left: number,
+  width: number,
+  trimStart: number,
+  trimEnd: number,
+): number {
+  const start = Number.isFinite(trimStart) ? trimStart : 0;
+  const end = Number.isFinite(trimEnd) ? Math.max(start, trimEnd) : start;
+  if (!Number.isFinite(clientX) || !Number.isFinite(left) || !Number.isFinite(width) || width <= 0) return start;
+  const ratio = Math.max(0, Math.min(1, (clientX - left) / width));
+  return start + ratio * (end - start);
+}
+
+export function clampProjectItemStart(targetStart: number, itemDuration: number, projectDuration: number): number {
+  const target = Number.isFinite(targetStart) ? targetStart : 0;
+  const duration = Number.isFinite(itemDuration) ? Math.max(0, itemDuration) : 0;
+  const project = Number.isFinite(projectDuration) ? Math.max(0, projectDuration) : 0;
+  return Math.max(0, Math.min(Math.max(0, project - duration), target));
+}
+
+export function hasPassedDragThreshold(
+  startX: number,
+  startY: number,
+  currentX: number,
+  currentY: number,
+  threshold = 6,
+): boolean {
+  if (![startX, startY, currentX, currentY, threshold].every(Number.isFinite)) return false;
+  return Math.hypot(currentX - startX, currentY - startY) >= Math.max(0, threshold);
+}
+
+export type TimelineSelectionTrack = 'video' | 'source-audio' | 'background-audio' | 'tts' | 'subtitle' | 'image' | 'effect';
+export interface TimelineSelection {
+  track: TimelineSelectionTrack;
+  linkedTrack?: TimelineSelectionTrack;
+  id: string;
+}
+export type TimelineSelectionState = 'selected' | 'linked' | 'none';
+
+export function timelineSelectionState(
+  selection: TimelineSelection | null,
+  candidateTrack: TimelineSelectionTrack,
+  candidateId: string,
+): TimelineSelectionState {
+  if (!selection || selection.id !== candidateId) return 'none';
+  if (selection.track === candidateTrack) return 'selected';
+  if (selection.linkedTrack === candidateTrack) return 'linked';
+  return 'none';
+}
+
 /** Move a project-time range while preserving its duration. */
 export function moveTimedRange(
   startTime: number,
